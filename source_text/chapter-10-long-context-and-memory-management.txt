@@ -1,0 +1,133 @@
+# Chapter 10: Long-Context and Memory Management
+
+_Source pages: PDF pages 37-39_
+
+
+
+--- Page 37 ---
+
+Efficient LLM Inference CHAPTER 10. LONG-CONTEXT AND MEMORY MANAGEMENT
+Chapter 10
+Long-ContextandMemoryManagement
+10.1 The Quadratic Attention Problem
+Attention’sO(n2) complexity in sequence length n is the central obstacle to long-context
+LLM inference. For n = 1 ,000,000 tokens (1M context, as in Gemini 1.5 Pro), the naive
+attention matrix would require1,000,0002 × 2 bytes = 2 petabytes — clearly infeasible. Even
+for n = 128,000 (128K context), the attention matrix is 32 GB.
+Modern long-context approaches attack this problem from several angles.
+10.2 FlashAttention for Long Context
+As discussed in Chapter 7, FlashAttention avoids materializing the full attention matrix by
+tiling. This does not reduce theO(n2) compute complexity, but it reduces theO(n2) HBM
+memory requirement toO(n), making attention computationally feasible at 128K tokens on
+current hardware.
+10.3 Ring Attention
+Ring Attention (Liu et al., 2023) distributes long-context attention computation across multi-
+ple devices arranged in a ring. Each device holds a chunk of the sequence’s QKV tensors, and
+devices pass KV chunks around the ring while computing local attention. The key insight is
+that the online softmax trick allows correct normalization even when a device only sees one
+KV chunk at a time. Ring Attention reduces per-device memory fromO(n2) to O(n/p) where
+p is the number of devices, enabling million-token contexts across device clusters.
+10.4 Context Compression
+Rather than computing full attention over all context, context compression techniques selec-
+tively summarize or remove low-information tokens:
+LLMLingua (Jiang et al., 2023) uses a small language model to score each token’s per-
+plexity given its context; low-perplexity (easily predictable) tokens are dropped. Compression
+ratios of 4–20× are achievable with<5% performance degradation on many tasks.
+AutoCompressor fine-tunes the model itself to summarize long contexts into a fixed
+number of “summary vectors,” which are then used as a compressed KV cache.
+10.5 State Space Models as Linear Attention
+Mamba (Gu & Dao, 2023) and its successors are state space models (SSMs) that process
+sequences through a learned recurrent state rather than attention:
+ht = Aht−1 + Bxt, y t = Cht
+AI Engineering Insider 33
+
+
+--- Page 38 ---
+
+Efficient LLM Inference CHAPTER 10. LONG-CONTEXT AND MEMORY MANAGEMENT
+where A, B, C are input-dependent in selective SSMs (S6). This achievesO(n) time and
+O(1) memory for inference (the hidden stateh is fixed-size regardless of sequence length).
+At inference time, SSMs are equivalent to RNNs: each new token requires only updating
+the state, with no KV cache. The trade-off is that SSMs have weaker in-context retrieval
+capability compared to attention for tasks requiring precise recall of specific prior context.
+Interview Preparation — Mock Q&A
+Q10.1. How does Ring Attention achieve distributed long-context inference?
+What is its communication cost?
+Answer: Ring Attention distributes the sequence acrossp devices. Device i holds query
+chunk Qi and key-value chunks (Ki, Vi). In each of p communication steps, devices
+pass their KV chunk to the next device in the ring and receive the previous device’s
+KV chunk. While waiting for the next KV chunk (overlapped with computation), each
+device computes partial attention scores between its localQi and the current KV chunk,
+accumulating the online softmax statistics. After p steps, each device has computed
+the correct attention output for its query chunk. Communication cost: each step
+transfers n/p tokens of KV cache (two tensors: K and V). Total communication per
+layer: n × dhead × nheads × 2 × precision, identical to the total KV data — no extra
+communication overhead. Communication is pipelined with computation.
+Q10.2. Compare Mamba (SSM) and Transformer attention for long-context
+inference. When would you use each?
+Answer:Transformerattention : O(n2)computeand O(n)KVcachememory. Excels
+at tasks requiring precise recall of specific details anywhere in the context (e.g., “What
+did the document say about X on page 3?”). Performance degrades gracefully as context
+grows if FlashAttention is used. Mamba: O(n) compute and O(1) state (fixed-size
+recurrent state). Highly efficient for very long sequences — each token requires constant
+computation regardless of total context length. Weakness: selective SSMs have difficulty
+with precise retrieval from distant context, performing worse than attention on retrieval-
+heavy benchmarks (RULER, passkey retrieval). When to use Mamba: streaming
+inference over very long documents, time-series prediction, applications where the model
+needs to track evolving state rather than retrieve specific facts.Hybrid models(Jamba,
+Zamba, Mamba-2 + attention) combine both — using SSM layers for most processing
+and sparse attention layers for retrieval.
+Q10.3. How does LLMLingua compress prompts? What are the risks of
+prompt compression?
+Answer: LLMLingua uses a small surrogate LLM to estimate the perplexity of each to-
+ken given its (possibly compressed) context. Tokens with low perplexity are deemed pre-
+dictable and thus low-information, making them candidates for removal. The algorithm:
+(1) Coarse granularity: determine which sentences or phrases to keep; (2) Fine granular-
+ity: within kept segments, remove low-perplexity tokens; (3) Target compression ratio
+determines aggressiveness. Risks: (1) The surrogate model’s notion of “predictability”
+may differ from the target model’s, causing important tokens to be dropped; (2) Remov-
+ing tokens changes positional context for all subsequent tokens — models with absolute
+positional encodings may be particularly sensitive; (3) For retrieval-heavy tasks (pre-
+cise name/number lookup), even low-perplexity tokens may be critically important; (4)
+AI Engineering Insider 34
+
+
+--- Page 39 ---
+
+Efficient LLM Inference CHAPTER 10. LONG-CONTEXT AND MEMORY MANAGEMENT
+Compression is irreversible — errors cannot be recovered. Practical guideline: validate
+LLMLingua on your specific task distribution before production deployment.
+Q10.4. Explain the difference between YaRN and NTK-aware scaling for
+RoPE context extension.
+Answer: Both YaRN and NTK-aware scaling attempt to extend a model trained with
+RoPEoncontextlength Ltolongercontexts L′ > L withoutfine-tuning(orwithminimal
+fine-tuning). NTK-aware scaling (bloc97, 2023) rescales the RoPE base frequency:
+instead of base b = 10 ,000, use b′ = b · (L′/L)d/(d−2). This spreads rotations more
+evenly across the extended range, keeping high-frequency dimensions from wrapping.
+However, it applies the same scaling to all frequency dimensions.YaRN (Peng et al.,
+2023) uses a more sophisticated approach: it does not scale low-frequency dimensions at
+all (they already have good far-range coverage), applies NTK-style scaling to medium
+frequencies, and linearly interpolates high frequencies. This preserves in-distribution
+behavior for short sequences while enabling longer sequences. YaRN also applies an
+attention temperature correction (scaling attention scores by
+p
+1/t) to compensate for
+the changed attention distribution. YaRN consistently outperforms NTK-aware scaling
+on perplexity and retrieval benchmarks at extended context lengths.
+Q10.5.What is RAG, and how does it relate to long-context inference? When
+would you choose one over the other?
+Answer:RAG(Retrieval-AugmentedGeneration)selectivelyfetchesrelevantdocuments
+from a vector database at query time, inserting only the most relevant passages into the
+prompt. It effectively replaces the need for a very long context window by using a
+retrieval system. Long-context inferenceinstead puts all potentially relevant infor-
+mation directly in the model’s context window.Choose RAG when: (1) The corpus
+is very large (millions of documents) — far exceeding any feasible context window; (2)
+Retrieval is precise — the query clearly maps to specific documents; (3) Latency from
+retrieval indexing is acceptable; (4) Cost of long-context compute is prohibitive.Choose
+long-context when: (1) The task requires synthesizing or comparing across many parts
+of a document (e.g., complex reasoning over a full book); (2) Retrieval is noisy — the
+model benefits from access to full context to distinguish relevant from irrelevant; (3) The
+document corpus is small enough to fit (<1M tokens). The ideal system often combines
+both: RAG to narrow the candidate set, then long-context to reason over the retrieved
+passages.
+AI Engineering Insider 35

@@ -1,0 +1,139 @@
+# Chapter 6: KV Cache Optimization
+
+_Source pages: PDF pages 24-26_
+
+
+
+--- Page 24 ---
+
+Efficient LLM Inference CHAPTER 6. KV CACHE OPTIMIZATION
+Chapter 6
+KV Cache Optimization
+6.1 The KV Cache Memory Crisis
+As shown in Chapter 3, the KV cache for a single long-context request can consume tens
+of gigabytes of GPU memory. For a serving system with hundreds of concurrent requests,
+naively pre-allocating maximum-length KV caches wastes most of the allocated memory (since
+actual request lengths are unpredictable) and severely limits batch size. This was the central
+unsolved problem in LLM serving before 2023.
+6.2 PagedAttention: Virtual Memory for KV Caches
+PagedAttention (Kwon et al., 2023), the core innovation in vLLM, applies operating-system
+virtual memory concepts to KV cache management.
+Instead of allocating a contiguous block of memory for each request’s KV cache, PagedAt-
+tention divides the KV cache into fixed-sizeblocks (pages) ofB tokens each. Ablock table
+maps each request’s logical KV cache positions to physical blocks in GPU memory — blocks
+need not be contiguous.
+PagedAttention Key Properties
+• No pre-allocation: Blocks are allocated on-demand as generation proceeds.
+• No internal fragmentation: Wasted memory is at most(B −1) tokens per request.
+• Copy-on-write: Multiple requests sharing the same prefix (e.g., a system prompt)
+can share physical blocks until their paths diverge.
+• Flexible eviction: Blocks from one request can be swapped to CPU or disk to make
+room for another.
+PagedAttention requires a modified attention kernel that gathers non-contiguous blocks
+during the attention computation — a non-trivial engineering challenge that vLLM imple-
+ments via custom CUDA kernels.
+6.3 Prefix Caching (Prompt Caching)
+Many production workloads share a long common prefix — a system prompt, a document, or a
+few-shot example — across thousands of requests. Without caching, every request recomputes
+the KV cache for this shared prefix from scratch.
+Prefix caching(also called prompt caching, implemented in vLLM, SGLang, and offered
+by Anthropic/OpenAI as a feature) stores the KV cache for common prefixes and reuses them
+across requests. This can reduce prefill cost by 90%+ when the prefix is long relative to the
+user prompt.
+AI Engineering Insider 20
+
+
+--- Page 25 ---
+
+Efficient LLM Inference CHAPTER 6. KV CACHE OPTIMIZATION
+6.4 StreamingLLM: The Attention Sink Phenomenon
+For applications requiring indefinitely long context (streaming conversations, long-running
+agents), we cannot store the KV cache for all tokens — it grows without bound. Naive sliding
+window attention (keeping only the most recentW tokens’ KV cache) causes catastrophic
+performance degradation. Why? LLMs develop “attention sinks”: the first few tokens in
+the sequence (regardless of their semantic content) receive disproportionately large attention
+scores across all layers. Removing them destroys the model’s internal representations.
+StreamingLLM (Xiao et al., 2023) keeps a small “sink” of the initial tokens (typically
+4) along with a sliding window of recent tokens, enabling infinite-length LLM inference with
+bounded memory:
+KV retained = sink tokens∪recent window
+6.5 KV Cache Quantization
+The KV cache itself can be quantized independently of model weights, since it is read-once
+per attention step and any quantization error only affects the current decode step rather than
+accumulating. INT8 KV cache quantization is now standard in frameworks like TensorRT-
+LLM and vLLM, providing∼2× KV memory reduction. More aggressive schemes apply INT4
+or even FP8 to the KV cache with careful per-head or per-channel scaling.
+Interview Preparation — Mock Q&A
+Q6.1. Explain PagedAttention. How does it differ from pre-allocated con-
+tiguous KV cache management?
+Answer: Traditional KV cache management pre-allocates a contiguous block of GPU
+memory sized for the maximum possible sequence length for each request. This wastes
+enormous memory because most requests are much shorter than the maximum. Addi-
+tionally, it fragments memory: once a block is released, the gap may be too small for a
+new block, leading to external fragmentation. PagedAttention divides KV cache mem-
+ory into fixed-size blocks (∼16 tokens per block) and maintains a block table per request
+mapping logical positions to physical blocks. Blocks are allocated on demand as new
+tokens are generated and freed immediately when a request completes. This eliminates
+pre-allocation waste, reduces fragmentation to at mostB − 1 tokens per request, and
+enables copy-on-write sharing of common prefix blocks across requests. The result is
+typically 2–4× higher batch size for the same GPU memory.
+Q6.2. How does prefix caching work, and what kind of application benefits
+most from it?
+Answer: Prefix caching stores the computed KV cache for a prefix of tokens (e.g., a
+system prompt) and reuses it for subsequent requests that share that prefix. The system
+maintains a hash map from prefix token sequence (or content hash) to physical KV cache
+blocks. When a new request arrives, the serving system checks if any of its leading token
+positions match a cached prefix; if so, the prefill step for those tokens is skipped entirely.
+Applications that benefit most: (1)API products with fixed system prompts: e.g.,
+a customer service bot with a 2000-token system prompt — every user message benefits
+from the cached prefix; (2)Multi-turn conversations: subsequent turns can reuse KV
+for all prior turns; (3)Batch document processing: e.g., 1000 questions about the
+AI Engineering Insider 21
+
+
+--- Page 26 ---
+
+Efficient LLM Inference CHAPTER 6. KV CACHE OPTIMIZATION
+same document share the document’s KV cache. Real-world latency reduction can be
+50–90% for the prefill phase.
+Q6.3. What is the attention sink phenomenon? Why does naïve sliding win-
+dow attention fail for StreamingLLM?
+Answer: When LLMs are trained on fixed-length sequences, they learn to direct large
+amounts of attention toward the first few tokens of every sequence — these are called “at-
+tention sinks.” The first tokens act as aggregators that absorb excess attention probabil-
+ity mass that the softmax requires to normalize. These sink tokens are not semantically
+important; they simply become structural anchors. Naïve sliding window attention,
+which discards the oldest tokens to maintain a fixed-size KV cache, inadvertently re-
+moves these sink tokens when the window slides past the beginning. Without the sinks,
+the attention normalization breaks: softmax scores over the remaining tokens become
+very different from the training distribution, causing outputs to degrade catastrophi-
+cally. StreamingLLM fixes this by always retaining the first 4 initial sink tokens in the
+KV cache alongside the recent window, restoring normal attention behavior.
+Q6.4. How would you design a KV cache eviction policy for a system serving
+requests with highly variable lengths?
+Answer: I would implement a priority-based eviction policy combining several signals:
+(1) Recency (LRU): evict the least recently accessed blocks first; (2)Sequence com-
+pletion probability: use the request’s current position and typical length distribution
+to estimate how close it is to completion — prefer evicting requests likely to complete
+soon; (3)Block shareability: protect blocks that are shared by multiple requests (pre-
+fix cache blocks) as they have high amortized value; (4)Eviction cost: prefer evicting
+from requests that can cheaply recompute the KV cache (short prompts) over those with
+long, expensive prefills. I would also implement block swapping to CPU DRAM as a sec-
+ond tier before outright eviction, since CPU memory is abundant. vLLM’s preemption
+mechanism is a practical example: it pauses and re-schedules requests when memory
+pressure is high.
+Q6.5. Explain KV cache quantization. Can you quantize the KV cache more
+aggressively than model weights? Why or why not?
+Answer: KV cache quantization stores the keys and values (the attention cache) in re-
+duced precision (INT8, INT4, or FP8) rather than FP16. There are good arguments
+for more aggressivequantization of KV cache than weights: (1) KV cache values are
+read once per attention step and do not accumulate errors across steps (each decode
+step reads fresh from the cache); (2) The attention operation is inherently normalized
+(softmax), providing some robustness to key quantization errors; (3) There is more re-
+dundancy across heads and layers in KV cache than in weight matrices. However, there
+are also counterarguments: activations (which the KV cache is derived from) exhibit
+outlier phenomena similar to activation quantization, making them harder to quantize
+than weights. In practice, INT8 KV cache is now well-established with minimal quality
+loss; INT4 KV cache is feasible with per-head or per-token scaling but requires careful
+implementation.
+AI Engineering Insider 22

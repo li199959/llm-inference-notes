@@ -1,0 +1,171 @@
+# Chapter 4: Quantization
+
+_Source pages: PDF pages 17-20_
+
+
+
+--- Page 17 ---
+
+Efficient LLM Inference CHAPTER 4. QUANTIZATION
+Chapter 4
+Quantization
+4.1 Why Quantization Matters
+A 70B-parameter model in FP32 requires 280 GB of GPU memory — more than three A100
+80GB GPUs just to hold the weights. In FP16 or BF16, this drops to 140 GB. With INT8
+quantization, it becomes 70 GB (fits on one H100 with room for KV cache). With INT4,
+it drops to 35 GB, fitting comfortably on a single GPU. Quantization is not an academic
+curiosity — it is the difference between serving a model and not serving it.
+4.2 Number Formats
+Format Bits Range Characteristics
+FP32 32 ±3.4 ×
+1038
+Full precision, training standard
+BF16 16 ±3.4 ×
+1038
+Same exponent range as FP32, less
+mantissa precision
+FP16 16 ±65, 504 Common inference format; overflow
+risk
+FP8 E4M3 8 ±448 H100 native; inference and fine-
+tuning
+FP8 E5M2 8 ±57, 344 More range, less precision
+INT8 8 −128 to
+127
+Widely supported; 2× size saving vs
+FP16
+INT4 4 −8 to 7 4× size saving; requires careful cali-
+bration
+INT2 2 −2 to 1 Extreme compression; significant
+quality loss
+4.3 Post-Training Quantization Methods
+4.3.1 GPTQ
+GPTQ (Frantar et al., 2022) is a layer-wise second-order PTQ method. It quantizes weights
+row by row, updating remaining weights to compensate for the quantization error of already-
+quantized weights using the inverse Hessian:
+δW = − wq − w
+[H−1
+F ]qq
+· [H−1
+F ]:,q
+GPTQ achieves near-lossless 4-bit weight quantization for models≥30B parameters and
+is the foundation of many popular quantization tools (AutoGPTQ, ExLlamaV2).
+AI Engineering Insider 13
+
+
+--- Page 18 ---
+
+Efficient LLM Inference CHAPTER 4. QUANTIZATION
+4.3.2 AWQ (Activation-Aware Weight Quantization)
+AWQ (Lin et al., 2023) observes that not all weights are equally important — weights cor-
+responding to large-magnitude activations are more sensitive to quantization error. AWQ
+protects these salient weights by scaling channels before quantization:
+Q(W ·diag(s)−1) ·diag(s) ≈ W
+This preserves the mathematical equivalence while reducing the effective quantization
+range of critical channels. AWQ consistently outperforms GPTQ at 4-bit precision and is
+widely used in production.
+4.3.3 QuIP# and AQLM
+QuIP# (Tseng et al., 2024) uses incoherence processing — randomly rotating weights and
+activations before quantization — to flatten the distribution of values and enable near-lossless
+2-bit quantization. AQLM (Additive Quantization of Language Models) uses a codebook-
+based approach where weight vectors are encoded as sums of codebook entries, enabling 2-bit
+equivalent compression with quality closer to 4-bit methods.
+4.4 Quantization-Aware Training (QAT)
+PTQ methods calibrate on a small dataset and apply quantization post-hoc, which limits
+their accuracy recovery. QAT incorporates fake quantization operators into the forward pass
+during fine-tuning:
+ˆx = round
+ x
+s
+
+· s
+where s is the learned quantization scale. Gradients flow through the rounding operation
+via the Straight-Through Estimator. QAT yields higher accuracy than PTQ at extreme bit-
+widths (2–3 bit) but requires significant compute budget.
+4.5 Activation Quantization Challenges
+While weight quantization is relatively straightforward (weights are static and their distri-
+bution can be analyzed offline),activation quantizationis much harder. Activations have
+dynamic ranges that vary by input, and LLMs exhibit a well-documented phenomenon: a
+small number of channels (“outliers”) have activation magnitudes 100× larger than typical
+channels. Naively quantizing activations to INT8 forces the quantization scale to accom-
+modate these outliers, causing all normal-range activations to collapse to just a few distinct
+values.
+Solutions include:
+• LLM.int8()(Dettmers et al.): Decompose matrix multiplication, keeping outlier channels
+in FP16 and the rest in INT8.
+• SmoothQuant: Migrate the quantization difficulty from activations to weights via per-
+channel scaling: Y = (Xdiag(s)−1) · (diag(s)W).
+• FP8 activations: The wider dynamic range of FP8 compared to INT8 naturally accom-
+modates outliers.
+AI Engineering Insider 14
+
+
+--- Page 19 ---
+
+Efficient LLM Inference CHAPTER 4. QUANTIZATION
+Interview Preparation — Mock Q&A
+Q4.1. You need to deploy a 70B LLM on 2 A100 80GB GPUs. What quan-
+tization strategy would you choose and why?
+Answer: Two A100 80GB GPUs give us 160 GB total GPU memory. A 70B model in
+FP16 requires 140 GB for weights alone, leaving only 20 GB for KV cache and activations
+— uncomfortably tight. I would applyAWQ 4-bit quantization, reducing the weight
+footprintto ∼35GB.Thisleaves ∼125GBforKVcache, batchactivations, andoverhead.
+AWQ 4-bit typically preserves>99% of the original model’s benchmark scores on general
+reasoning tasks. I would also evaluate GPTQ as an alternative. I’d calibrate on domain-
+specific data if the deployment use case is specialized. For the serving framework, I’d
+use vLLM with AWQ support and tensor parallelism across the two GPUs.
+Q4.2. Explain the difference between weight-only quantization and weight-
+and-activation quantization. When does each apply?
+Answer: Weight-only quantization(W4A16, W8A16) quantizes the model parame-
+ters to INT4 or INT8 but keeps activations in FP16 at runtime. Weights are dequantized
+back to FP16 before the matrix multiplication. This reduces model size and memory
+bandwidth for weight loading (critical for decode), but the actual GEMM computation
+still runs in FP16. Methods: GPTQ, AWQ. Weight-and-activation quantization
+(W8A8, W4A4) quantizes both weights and activations, enabling the matrix multiplica-
+tion itself to run in INT8 or INT4. This provides additional compute throughput from
+Tensor Core acceleration. However, it requires careful handling of activation outliers.
+Methods: SmoothQuant, LLM.int8(). For purely memory-bound decode workloads,
+W4A16 is often sufficient. For compute-bound prefill or large batch sizes, W8A8 or
+FP8 provides additional speedup.
+Q4.3.What is the Straight-Through Estimator and why is it needed for QAT?
+Answer: The rounding operation in quantization (ˆx = round(x/s) · s) has a zero deriva-
+tive almost everywhere — it is a staircase function. This means that naive backpropaga-
+tion through a quantization node produces zero gradients, making learning impossible.
+The Straight-Through Estimator (STE), introduced by Bengio et al. (2013), ap-
+proximates the gradient of the round function as 1 (identity) within the quantization
+range: ∂ ˆx
+∂x ≈ 1|x|≤threshold. This is mathematically unjustified but empirically effective
+— it allows gradients to flow through the quantization operation during the backward
+pass as if the rounding had not occurred, enabling the model to learn weight values that
+“round well.”
+Q4.4. How does SmoothQuant address the activation outlier problem? What
+are its limitations?
+Answer: SmoothQuant observes that activation outliers are difficult to quantize
+(large dynamic range, few extreme values) but weights are easy (smooth distribu-
+tions). The key insight is that we can migrate the quantization difficulty from ac-
+tivations to weights via a mathematically equivalent transformation: if Y = XW,
+then Y = ( Xdiag(s)−1) · (diag(s)W) for any positive scaling vector s. By choosing
+sj = max( |X:,j|)α/ max(|Wj,:|)1−α, we equalize the ranges. Limitations: (1) Re-
+quires calibration data to estimate per-channel activation statistics; (2) The optimal
+α is task-dependent; (3) Does not fully eliminate outliers in all layers; (4) Some models
+(particularly with very large vocabulary or embedding layers) still exhibit quantization
+sensitivity.
+AI Engineering Insider 15
+
+
+--- Page 20 ---
+
+Efficient LLM Inference CHAPTER 4. QUANTIZATION
+Q4.5. Compare GPTQ and AWQ. Which would you use in production and
+under what conditions?
+Answer: GPTQ uses second-order (Hessian) information to minimize the layer-wise
+quantization error, sequentially updating weights to compensate for previously quan-
+tized weights. It is computationally expensive to run but produces high-quality quantized
+models, especially for larger models where the Hessian approximation is more accurate.
+AWQis simpler and faster — it identifies the 1% of weight channels with highest ac-
+tivation magnitudes and protects them by scaling before quantization, requiring only
+forward passes for calibration. In practice, AWQ tends to outperform GPTQ at 4-bit
+precision on most tasks and is faster to apply. I would useAWQ in productiondue
+to its speed, quality, and broad community support (AutoAWQ). I’d consider GPTQ for
+specialized tasks where careful calibration on domain data is worthwhile, or when using
+ExLlamaV2’s highly optimized GPTQ kernel.
+AI Engineering Insider 16

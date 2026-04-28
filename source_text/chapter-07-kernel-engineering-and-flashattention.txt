@@ -1,0 +1,166 @@
+# Chapter 7: Kernel Engineering and FlashAttention
+
+_Source pages: PDF pages 27-30_
+
+
+
+--- Page 27 ---
+
+Efficient LLM Inference CHAPTER 7. KERNEL ENGINEERING AND FLASHATTENTION
+Chapter 7
+KernelEngineeringandFlashAttention
+7.1 Why Custom CUDA Kernels Matter
+High-level frameworks like PyTorch compose operations from library primitives: a linear
+layer is a call to torch.nn.Linear, which calls into cuBLAS for the GEMM, then writes
+results to HBM, then reads them back for the next operation. Thiseager execution model
+creates massive HBM traffic for intermediate tensors that could have been kept in fast on-chip
+memory.
+Kernel fusion combines multiple operations into a single GPU kernel, keeping inter-
+mediate results in registers or shared memory and avoiding HBM round-trips. For a fused
+LayerNorm+Linear+GeLUkernel, wereduceHBMtrafficby3 ×comparedtothreeseparate
+kernels.
+7.2 FlashAttention: IO-Aware Exact Attention
+Standard attention materializes the fulln × n attention matrix in HBM:
+S = QK⊤
+√dk
+, P = softmax(S), O = PV
+For n = 16,384 and FP16, this matrix is16,3842 × 2 ≈ 537 MB. Reading and writing this
+matrix to HBM takes∼0.5 ms on an A100 — and this must happen twice per forward pass
+(once for P computation, once for the backward pass during training).
+FlashAttention (Dao et al., 2022) eliminates this bytiling: decomposing the attention
+computation into blocks that fit in SRAM, computing the numerically stable softmax incre-
+mentally using the online softmax trick, and never materializing the full attention matrix in
+HBM.
+FlashAttention Complexity
+Standard Attention FlashAttention
+HBM reads/writes O(n2) O(n2/M) (fewer passes)
+SRAM usage O(n2) O(M ) (tile size)
+Speed Baseline 2–4 × faster
+Sequence length limit HBM limited Longer contexts feasible
+FlashAttention-2 (Dao, 2023) improved parallelism by splitting the work across thread
+blocks along the sequence length dimension and reducing non-matrix-multiply operations.
+FlashAttention-3 (Shah et al., 2024) further exploits H100-specific features: asynchronous
+memory copies with WGMMA (Warpgroup Matrix Multiply Accumulate) instructions and
+FP8 precision, achieving∼75% of H100 peak FLOP/s utilization.
+AI Engineering Insider 23
+
+
+--- Page 28 ---
+
+Efficient LLM Inference CHAPTER 7. KERNEL ENGINEERING AND FLASHATTENTION
+7.3 The Online Softmax Trick
+The core mathematical challenge of tiling attention is computing the exact softmax when we
+process the sequence in chunks. The online softmax (Milakov & Gimelshein, 2018) maintains
+a running maximumm and a running sumℓ to compute the softmax without seeing all values
+first:
+mi = max(mi−1, max
+j
+sij), ℓ i = emi−1−miℓi−1 +
+X
+j
+esij −mi
+At the end, O = Orunning/ℓ gives the exact softmax output. This is numerically stable
+and requires onlyO(1) extra state per row of the attention matrix.
+7.4 Triton: Pythonic Kernel Programming
+CUDA kernel development requires expertise in C++ and GPU-specific optimizations. Triton
+(Tillet et al., 2019) is a Python-based DSL for writing GPU kernels that abstracts away low-
+level details while generating highly optimized code:
+1 import triton
+2 import triton . language as tl
+3
+4 @triton . jit
+5 def f u s e d _ s o f t m a x _ k e r n e l (X , Y , stride , N ,
+6 BLOCK : tl . c on st ex pr ) :
+7 row = tl . p r o g r a m _ i d (0)
+8 x_ptrs = X + row * stride + tl . arange (0 , BLOCK )
+9 x = tl . load ( x_ptrs , mask = tl . arange (0 , BLOCK ) < N )
+10 x_max = tl . max (x , axis =0)
+11 x = x - x_max
+12 nu me ra to r = tl . exp ( x )
+13 d e n o m i n a t o r = tl . sum ( numerator , axis =0)
+14 y = num er at or / d e n o m i n a t o r
+15 tl . store ( Y + row * stride + tl . arange (0 , BLOCK ) ,
+16 y , mask = tl . arange (0 , BLOCK ) < N )
+Triton handles shared memory allocation, warp-level synchronization, and vectorization
+automatically, allowing ML engineers to write high-performance kernels without deep CUDA
+expertise.
+Interview Preparation — Mock Q&A
+Q7.1. Explain why FlashAttention is faster than standard attention. What is
+the key bottleneck it addresses?
+Answer:Standard attention materializes the fulln×nattention matrix (QK⊤) in HBM.
+For long sequences, this matrix can be hundreds of megabytes to gigabytes, and read-
+ing/writing it to HBM is the dominant cost — not the actual arithmetic. FlashAttention
+is faster because it isIO-aware: it tiles the attention computation into blocks that fit in
+the GPU’s on-chip SRAM (shared memory), computing the softmax incrementally using
+the online softmax trick. Intermediate results stay in fast SRAM and are never written
+to HBM. The final output for each block is accumulated and written to HBM once. The
+AI Engineering Insider 24
+
+
+--- Page 29 ---
+
+Efficient LLM Inference CHAPTER 7. KERNEL ENGINEERING AND FLASHATTENTION
+HBM traffic is reduced fromO(n2) to O(n · d), matching the theoretical minimum for
+reading inputs and writing outputs. On an A100, FlashAttention achieves 2–4× speedup
+over standard attention for long sequences.
+Q7.2. What is kernel fusion and why does it improve inference performance?
+Answer: Kernel fusion is the combination of multiple computational operations (that
+would normally each launch a separate GPU kernel) into a single kernel that retains in-
+termediate results in on-chip memory (registers or shared memory) rather than writing
+them to HBM between operations. Without fusion: each operation writes its output to
+HBM, and the next reads it back — creating redundant memory traffic. With fusion:
+intermediate tensors live in registers or shared memory at>10 TB/s effective bandwidth
+rather than the 2–3 TB/s of HBM. Common fusion patterns in LLM inference: (1) QKV
+projection fused with RoPE application; (2) LayerNorm fused with the following lin-
+ear layer; (3) SiLU/GeLU gating fused with the FFN up-projection. Fused kernels in
+TensorRT-LLM and vLLM can reduce kernel launch overhead and HBM traffic simulta-
+neously, yielding 10–40% latency improvements over unfused baselines.
+Q7.3. How does the online softmax trick enable tiled attention computation?
+Answer: The standard softmax softmax(x)i = exi/P
+j exj requires seeing all values in
+the row before computing any output, precluding tiling. The online softmax processes
+the row in chunks, maintaining a running maximumm and exponential sum ℓ. When
+a new chunk arrives with valuesx′: (1) Update running max: m′ = max( m, max(x′));
+(2) Rescale existing sum:ℓ′ = ℓ · em−m′
++P ex′
+j −m′
+; (3) Rescale existing output:O′ =
+O · em−m′
+/ℓ′ + V′ · ex′−m′
+/ℓ′. At completion,O′ equals the exact softmax-weighted sum.
+This enables FlashAttention to processQ, K, V in tiles, producing exact results without
+materializing the full attention matrix.
+Q7.4. What improvements did FlashAttention-3 introduce for the H100, and
+how does it exploit H100-specific features?
+Answer: FlashAttention-3 was specifically engineered for the H100’s new hardware ca-
+pabilities: (1) WGMMA (Warpgroup Matrix Multiply Accumulate): The H100
+introduced new asynchronous matrix multiply instructions at the warpgroup level, allow-
+ing FA3 to overlap memory copy and compute operations within a tile, hiding memory
+latency; (2)TMA (Tensor Memory Accelerator): Hardware-managed asynchronous
+transfers between HBM and shared memory, reducing software overhead for data move-
+ment; (3)FP8 support: FA3 supports FP8 attention computation, doubling the effec-
+tive Tensor Core throughput for attention; (4)Ping-pong pipelining: Two warpgroups
+alternate between loading the next tile and computing on the current tile, keeping both
+the Tensor Cores and memory system fully busy. Together, FA3 achieves∼75% of the-
+oretical peak H100 FLOP/s on attention, vs.∼35% for FA2.
+Q7.5. When would you use Triton instead of writing raw CUDA? What are
+the trade-offs?
+Answer: I’d useTriton when: (1) I need a custom kernel (e.g., a novel fused opera-
+tion) but the team lacks deep CUDA expertise; (2) The kernel is “medium complexity”
+— not a simple elementwise operation (covered by PyTorch) but not requiring hand-
+tuned warp-level primitives; (3) Rapid iteration is important — Triton’s JIT compilation
+means I can experiment quickly. Triton’sadvantages: Python syntax, automatic shared
+memory tiling, simpler debugging, and generated code that is often within 10–20% of
+AI Engineering Insider 25
+
+
+--- Page 30 ---
+
+Efficient LLM Inference CHAPTER 7. KERNEL ENGINEERING AND FLASHATTENTION
+hand-optimized CUDA for many workloads. I’d useraw CUDAwhen: (1) Maximum
+performance is critical (e.g., the attention kernel in FlashAttention which requires ex-
+tremely precise control of memory access patterns and warp synchronization); (2) I need
+fine-grained control over warp-level primitives, bank conflict avoidance, or asynchronous
+copy pipelines (TMA/WGMMA on H100). The trade-off is development time (CUDA:
+weeks; Triton: days) vs. peak performance.
+AI Engineering Insider 26

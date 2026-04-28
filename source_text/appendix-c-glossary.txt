@@ -1,0 +1,63 @@
+# Appendix C: Glossary
+
+_Source pages: PDF pages 55-56_
+
+
+
+--- Page 55 ---
+
+Efficient LLM Inference CHAPTER 14. THE FUTURE OF INFERENCE
+Appendix C: Glossary
+Term Definition
+AWQ Activation-aware Weight Quantization. PTQ method
+that scales channels by activation magnitude before
+quantization.
+BF16 Brain Float 16. 16-bit format with same exponent
+range as FP32, used widely in LLM training and in-
+ference.
+FLOP Floating Point Operation.
+GQA Grouped Query Attention. Attention variant where
+groups of query heads share one KV pair.
+GPTQ Layer-wise second-order PTQ method using Hessian
+information for weight quantization.
+HBM High Bandwidth Memory. The type of DRAM used in
+modern GPUs (HBM2e, HBM3).
+KV Cache Key-Value cache. Stores attention keys and values for
+previously generated tokens.
+MFU Model FLOP Utilization. Fraction of peak FLOP/s
+used productively.
+MLA Multi-head Latent Attention. Attention variant with
+compressed latent KV representations.
+MoE Mixture of Experts. Model architecture with many
+expert FFNs and token routing.
+MQA Multi-Query Attention. All query heads share a single
+KV pair.
+NVLink NVIDIA’s high-bandwidth GPU-to-GPU interconnect
+(900 GB/s on H100).
+PagedAttention KV cache memory management using virtual memory
+paging.
+PRM Process Reward Model. Reward model that scores in-
+termediate reasoning steps.
+PTQ Post-Training Quantization. Quantization applied af-
+ter training.
+QAT Quantization-Aware Training. Quantization incorpo-
+rated during training.
+RoPE Rotary Positional Embeddings. Position encoding via
+complex rotation.
+SSM State Space Model. Sequential model using a learned
+recurrent state (Mamba, S4).
+TPOT Time Per Output Token. Duration between consecu-
+tive output tokens.
+TTFT Time To First Token. Duration from request to first
+output token.
+TensorCore Specialized GPU compute units for accelerated matrix
+multiplication.
+AI Engineering Insider 51
+
+
+--- Page 56 ---
+
+Efficient LLM Inference CHAPTER 14. THE FUTURE OF INFERENCE
+vLLM Virtual LLM. High-throughput serving system using
+PagedAttention and continuous batching.
+AI Engineering Insider 52

@@ -1,0 +1,29 @@
+# Appendix D: Hardware Comparison
+
+_Source pages: PDF pages 57-57_
+
+
+
+--- Page 57 ---
+
+Efficient LLM Inference CHAPTER 14. THE FUTURE OF INFERENCE
+Appendix D: Hardware Comparison
+GPU VRAM BW
+(TB/s)
+FP16
+TFLOP/s
+INT8
+TOPS
+TDP (W)
+H100 SXM5 80 GB 3.35 1,979 3,958 700
+H100 PCIe 80 GB 2.0 1,513 3,026 350
+A100 SXM 80 GB 2.0 312 624 400
+RTX 4090 24 GB 1.0 165 330 450
+RTX 3090 24 GB 0.94 71 142 350
+Apple M3 Ul-
+tra
+192 GB 0.8 28 56 60
+Groq LPU: ∼900 GB/s on-chip SRAM BW, ∼1 PB/s aggregate (64 chips)
+End of Book
+“The best inference is one that the user never has to think about.”
+AI Engineering Insider 53

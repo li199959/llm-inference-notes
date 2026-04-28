@@ -1,0 +1,170 @@
+# Chapter 1: The Inference Problem
+
+_Source pages: PDF pages 5-8_
+
+
+
+--- Page 5 ---
+
+Efficient LLM Inference CHAPTER 1. THE INFERENCE PROBLEM
+Chapter 1
+The Inference Problem
+1.1 Training vs. Inference: Fundamentally Different Goals
+When a large language model istrained, the objective is to minimize a loss function over a
+massive dataset. The system processes data in large batches, accumulates gradients across
+many GPUs, performs backward passes, and updates billions of parameters. Throughput is
+the supreme metric: we want to process as many tokens per second as possible, amortized
+across the training run. Latency of an individual forward pass is largely irrelevant — what
+matters is overall training time measured in days or weeks.
+Inference is the mirror image. Here the model parameters are frozen. The task is to
+compute a forward pass — transforming an input prompt into a predicted output — as fast
+and cheaply as possible, for each individual request, often from real users who are waiting for
+a response.
+Definition: Inference
+Inference is the act of running a trained neural network model on new, unseen input
+data to produce a prediction or output, without updating the model’s parameters.
+The goals of inference diverge sharply from training in three key dimensions:
+• Latency over throughput: A user waiting for a response experiences latency directly.
+A 200 ms response feels instant; a 3-second response feels slow.
+• Memory efficiency: At inference time, we typically do not need to store optimizer states
+or gradient buffers, but we do need to manage the KV cache for autoregressive generation.
+• Cost per request: In production, you serve millions of requests. Cost per request directly
+determines profitability.
+1.2 The Token Generation Loop Explained
+Modern LLMs areautoregressive: they generate text one token at a time, where each new
+token is conditioned on all previously generated tokens. This creates the fundamental loop of
+LLM inference.
+The Autoregressive Generation Loop
+1. Receive a prompt (sequence of input tokens).
+2. Run aprefillforward pass over the entire prompt in parallel, computing attention
+keys and values for all input tokens and caching them.
+3. Autoregressively decode: at each step, feed the last generated token as input,
+compute attention over the KV cache, and sample the next token.
+4. Repeat step 3 until a stop token is generated or a maximum length is reached.
+AI Engineering Insider 1
+
+
+--- Page 6 ---
+
+Efficient LLM Inference CHAPTER 1. THE INFERENCE PROBLEM
+The prefill phase is compute-bound: we process many tokens in parallel, fully utilizing the
+GPU’s tensor cores. The decode phase, however, is fundamentally memory-bandwidth-bound:
+we process a single token at a time, but must load the entire KV cache from GPU memory
+for every step. This asymmetry drives much of the complexity in inference systems.
+1.3 Latency, Throughput, and Cost: The Iron Triangle
+Inference optimization operates within a trilemma. Improving one dimension often comes at
+the expense of another:
+Metric Definition How to Improve
+Latency Time from request to comple-
+tion. Key sub-metrics: TTFT
+(Time to First Token) and
+TPOT (Time Per Output To-
+ken).
+Reduce model size, increase
+batch size carefully, use spec-
+ulative decoding, optimize KV
+cache.
+Throughput Tokens generated per second
+across all concurrent users.
+Increase batch size, use con-
+tinuous batching, tensor par-
+allelism.
+Cost USD per 1M tokens gener-
+ated.
+Quantize the model, use effi-
+cient serving frameworks, op-
+timize hardware utilization.
+The iron triangle manifests concretely: maximizing throughput requires large batch sizes,
+but large batches increase per-request latency. Minimizing latency often requires serving
+requests individually, which wastes GPU utilization and increases cost. Inference engineering
+is the art of navigating these tradeoffs intelligently for your specific application requirements.
+1.4 Memory Bandwidth: The True Bottleneck
+A common misconception is that inference is compute-bound — that we need more FLOPS. In
+reality, for autoregressive LLM decoding, the bottleneck is almost alwaysmemory bandwidth:
+the speed at which we can load model weights from GPU memory (HBM) to the GPU’s
+compute cores.
+Consider a 7-billion parameter model stored in 16-bit precision. The model weights occupy
+approximately:
+7 × 109 × 2 bytes = 14 GB
+An NVIDIA A100 GPU provides≈2 TB/s of HBM bandwidth. To load all weights once
+(one decode step), the theoretical lower bound on latency is:
+14 GB
+2000 GB/s = 7 ms
+This is before any compute. If we run with batch size 1, we spend this time loading weights
+to generate just one token. With batch size 64, we amortize the same weight load across 64
+requests simultaneously, dramatically improving throughput without changing latency much.
+1.5 The Roofline Model
+The Roofline model provides a clean framework for understanding whether a given operation
+is compute-bound or memory-bound. For any operation:
+AI Engineering Insider 2
+
+
+--- Page 7 ---
+
+Efficient LLM Inference CHAPTER 1. THE INFERENCE PROBLEM
+Achieved Performance (FLOP/s)= min (Peak FLOP/s, Arithmetic Intensity×Peak Bandwidth)
+where Arithmetic Intensityis measured in FLOP per byte of memory accessed.
+Practical Roofline Insight
+Matrix-vector multiplications (the core of the decode step with batch size 1) have low
+arithmetic intensity (∼1–2 FLOP/byte) and are solidly in the memory-bound regime.
+Large matrix-matrix multiplications (prefill with long prompts) have high arithmetic
+intensity and approach the compute bound. This is why prefill and decode behave so
+differently and why they benefit from different optimizations.
+Interview Preparation — Mock Q&A
+Q1.1. What is the difference between prefill and decode in LLM inference,
+and why does it matter for system design?
+Answer: The prefill phase processes the entire input prompt in a single parallel forward
+pass, making itcompute-bound because we multiply large token matrices against the
+weight matrices. The decode phase generates tokens one at a time autoregressively,
+making it memory-bandwidth-bound because we load all model weights for each
+single-token step. This distinction matters enormously for system design: prefill and
+decode have very different optimal batch sizes, GPU utilization profiles, and latency
+sensitivities. Modern systems like Splitwise and Mooncake physically separate prefill
+and decode onto different GPU pools, allowing each to be independently scaled and
+optimized.
+Q1.2. Explain the iron triangle of inference. How would you make a decision
+when optimizing for a latency-sensitive chatbot application?
+Answer: The inference iron triangle describes the tension between latency, throughput,
+and cost — improving one typically degrades another. For a latency-sensitive chatbot, I
+would prioritizeTTFT and TPOT. Concretely: (1) Use a smaller or quantized model
+to reduce per-step computation. (2) Keep batch sizes small or use continuous batching
+with strict SLO-aware scheduling. (3) Apply speculative decoding to generate multiple
+tokens per step. (4) Use prefix caching to skip re-computing the KV cache for repeated
+system prompts. I would accept higher cost per token as the trade-off for low latency.
+Q1.3. Why is memory bandwidth, rather than raw compute (FLOP/s), typi-
+cally the bottleneck in LLM decoding?
+Answer: During autoregressive decoding with a small batch size, the GPU must load
+the entire model weights from HBM for every token generated. A 7B-parameter model in
+FP16 is 14 GB; even on an A100 with 2 TB/s bandwidth, this takes approximately 7 ms
+per step. Meanwhile, the actual computation on a single token is trivially small compared
+to what the GPU’s tensor cores can handle. The arithmetic intensity of matrix-vector
+multiply (the key decode operation) is roughly 1–2 FLOP per byte, far below the∼300
+FLOP/byte threshold needed to be compute-bound. Only by increasing batch size do
+we amortize the weight-loading cost and approach compute-bound behavior.
+AI Engineering Insider 3
+
+
+--- Page 8 ---
+
+Efficient LLM Inference CHAPTER 1. THE INFERENCE PROBLEM
+Q1.4. How do you measure and report inference performance? What metrics
+would you instrument in a production serving system?
+Answer:Iwouldtrack: TTFT(timetofirsttoken, criticalforuser-perceivedresponsive-
+ness), TPOT (time per output token, determines streaming smoothness),throughput
+(tokens/second across all users),GPU utilization and memory utilization, good-
+put (fraction of requests meeting SLO),queue depth (to detect overload), andcost
+per million tokens. I’d set up percentile dashboards (p50, p95, p99) rather than av-
+erages, since tail latency is what breaks user experience. I’d also separately track prefill
+latency vs. decode latency to diagnose bottlenecks independently.
+Q1.5. A colleague argues that since FLOP/s keeps growing faster than mem-
+ory bandwidth, inference will soon be compute-bound. How do you respond?
+Answer: This is the classicbandwidth wall argument, and I’d partially agree with the
+observation but disagree with the conclusion. It is true that compute FLOP/s has grown
+faster than HBM bandwidth over recent GPU generations. However, the arithmetic
+intensity of single-batch decode is so low (1–2 FLOP/byte) that even with large FLOP/s
+improvements, we’d still be memory-bound unless batch sizes increase dramatically or
+model architectures change. Additionally, techniques like quantization deliberately trade
+compute for reduced memory traffic, keeping us in the memory-bound regime. The path
+forward is architectures and systems that increase arithmetic intensity per byte loaded
+— like GQA, MLA, and efficient KV caching — not simply hoping for faster compute.
+AI Engineering Insider 4
