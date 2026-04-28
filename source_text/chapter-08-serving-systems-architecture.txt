@@ -1,0 +1,138 @@
+# Chapter 8: Serving Systems Architecture
+
+_Source pages: PDF pages 31-33_
+
+
+
+--- Page 31 ---
+
+Efficient LLM Inference CHAPTER 8. SERVING SYSTEMS ARCHITECTURE
+Chapter 8
+Serving Systems Architecture
+8.1 Anatomy of a Production Inference Server
+A production LLM inference server is a complex distributed system. Its core components are:
+• Frontend / API Gateway: Receives HTTP requests, authenticates, rate-limits, and
+enqueues.
+• Scheduler: The brain of the serving system. Decides which requests to run in the current
+batch, managing GPU memory and SLO constraints.
+• Execution Engine: Runs the actual GPU forward passes, manages KV cache blocks.
+• Tokenizer: Converts text to token IDs and back (typically runs on CPU).
+• Sampler: Applies temperature, top-k, top-p, and other sampling logic to logits.
+8.2 Batching Strategies
+8.2.1 Static Batching
+The simplest approach: collect a fixed number of requests, pad them all to the length of the
+longest sequence, and process the padded batch. Highly inefficient: padding wastes compute
+and memory proportional to length variance.
+8.2.2 Continuous (Iteration-Level) Batching
+PioneeredbyOrca(Yuetal., 2022)andimplementedinvLLMandTGI.Insteadofbatchingat
+therequestlevel, batchatthe iteration (decodestep)level. Ateverydecodestep, thescheduler
+can add new requests (whose prefill has completed) to the running batch, and completed
+sequences are immediately removed. This keeps GPU utilization high by eliminating the
+“long tail” problem of static batching.
+8.2.3 Chunked Prefill
+Sarathi-Serve (Agrawal et al., 2024) observed that a single long prefill request can monopo-
+lize the GPU for hundreds of milliseconds, starving decode-phase requests (“prefill piracy”).
+Chunked prefill divides the prefill computation into smaller chunks that are interleaved with
+decode steps, providing more predictable latency across all request types.
+8.3 Disaggregated Prefill and Decode
+The fundamental tension between prefill (compute-bound) and decode (memory-bound) sug-
+gests they should be served on different hardware optimized for each regime. Disaggregated
+serving (Splitwise, Mooncake) physically separates:
+AI Engineering Insider 27
+
+
+--- Page 32 ---
+
+Efficient LLM Inference CHAPTER 8. SERVING SYSTEMS ARCHITECTURE
+• Prefill nodes: Maximize compute utilization (large batches, long prompts). Can use
+cheaper, older compute-optimized GPUs.
+• Decode nodes: Maximize memory bandwidth, support high concurrency. Benefit from
+newer GPUs with high HBM bandwidth per parameter.
+The challenge isKV cache migration: after prefill completes, the KV cache must be
+transferred from the prefill node to the decode node (over NVLink, InfiniBand, or RDMA),
+adding latency. Systems like Mooncake (from Kimi/Moonshot AI) use a distributed KV cache
+pool on secondary storage to decouple this entirely.
+8.4 SLO-Aware Scheduling
+Production systems must respect Service Level Objectives (SLOs) — typically expressed as
+p95 or p99 TTFT and TPOT targets. A naive FIFO scheduler may starve short requests
+behind long ones. SLO-aware scheduling techniques include:
+• Priority queuing: Shorter/higher-priority requests jump ahead.
+• Preemption: Pause a long-running request when its SLO trajectory is safe, free its KV
+cache blocks, and serve a higher-priority request.
+• Request routing: Route requests to different server pools based on estimated length and
+server load.
+• Admission control: Reject or queue requests when the system is overloaded to prevent
+SLO violations.
+Interview Preparation — Mock Q&A
+Q8.1. Explain continuous batching. Why is it superior to static batching for
+LLM serving?
+Answer: Static batching groups requests of similar length, pads shorter ones, and pro-
+cesses the batch until all requests complete. The problem: a batch of 32 requests where
+oneis10 ×longerthantheothersmeans31GPUswaitidleforthatonerequest. Compute
+wasted on padding tokens is permanent. Continuous batching (Orca, vLLM) operates
+at the iteration level: at every decode step, the scheduler checks whether any running
+requests have completed (emit <EOS>) and replaces them immediately with newly ar-
+rived requests from the queue. No padding across requests of different lengths — each
+request occupies only the tokens it actually needs. GPU utilization stays consistently
+high because there is no “batch wait” for stragglers. In practice, continuous batching
+improves throughput by 5–23× over static batching at similar latency, according to the
+Orca paper’s benchmarks.
+Q8.2. What is “prefill piracy” and how does chunked prefill address it?
+Answer: Prefill piracy describes the situation where a request with a very long prompt
+monopolizes the GPU during its prefill phase — potentially for hundreds of millisec-
+onds — while all decode-phase requests in the batch stall. During prefill, the GPU is
+computing GEMM over a large token matrix; decode requests that are in the middle
+AI Engineering Insider 28
+
+
+--- Page 33 ---
+
+Efficient LLM Inference CHAPTER 8. SERVING SYSTEMS ARCHITECTURE
+of generating tokens must wait, causing their TPOT (time per output token) to spike.
+Chunked prefill (Sarathi-Serve) divides the prefill of a long prompt into small chunks
+(e.g., 512 tokens per chunk) and interleaves each chunk with decode steps. This means
+a 4096-token prefill contributes only 512 tokens of compute before yielding to the de-
+code batch, reducing decode TPOT degradation by 5–10× while adding only minimal
+overhead to total prefill time.
+Q8.3. Describe the architecture of vLLM. What are its key innovations and
+where are its limitations?
+Answer: vLLM (Virtual LLM) is a high-throughput serving system built around three
+core innovations: (1) PagedAttention: non-contiguous block-based KV cache mem-
+ory management eliminating fragmentation; (2)Continuous batching: iteration-level
+batching for high GPU utilization; (3)Custom attention kernels: CUDA kernels for
+pagedattentioncomputation. Thearchitecture: requestsarriveatanAPIserver, aretok-
+enized, then scheduled by theLLMEngine which manages KV blocks via aBlockManager,
+and executed on GPU workers via a custom execution engine. Limitations: (1) vLLM’s
+current scheduler is not fully SLO-aware — it can starve short requests; (2) Tensor paral-
+lelismcommunicationoverheadcanbesignificantforsmallmodels; (3)ThePython-heavy
+scheduling layer adds latency for very short requests; (4) Disaggregated prefill/decode is
+not natively supported in the base vLLM; (5) Non-standard architectures (MoE, non-
+transformer models) require custom plugin development.
+Q8.4. How does disaggregated prefill/decode serving work? What are the
+engineering challenges?
+Answer:Disaggregated serving routes prefill computation to dedicated prefill nodes and
+decode computation to dedicated decode nodes. A request arrives at a router, is sent
+to a prefill node which runs the prompt forward pass and produces a KV cache, then
+the KV cache is transferred (via RDMA/InfiniBand) to a decode node which generates
+tokens until completion. Theengineering challengesare substantial: (1)KV cache
+transfer latency: Transferring a 10 GB KV cache over a 400 Gb/s InfiniBand link takes
+∼200 ms — often longer than the prefill itself. Optimization: transfer KV blocks layer by
+layer, pipelining with decode; (2)Resource balancing: Prefill and decode nodes have
+different compute/memory ratios; over/under-provisioning either pool degrades overall
+throughput; (3)Fault tolerance: If a decode node fails mid-generation, the KV cache
+must be recovered; (4)Routing complexity: The router must estimate request length
+to balance load optimally.
+Q8.5. What metrics would you use to evaluate and compare two LLM serving
+systems?
+Answer: I would evaluate on: (1)TTFT p50/p95/p99: Critical for interactive ap-
+plications — how fast does the first token appear; (2)TPOT p50/p95: Streaming
+smoothness — how fast do subsequent tokens arrive; (3)Throughput (tokens/s):
+Total system output at a given hardware configuration; (4)Goodput: Fraction of re-
+quests meeting all SLO targets simultaneously (TTFT and TPOT); (5)GPU utiliza-
+tion (MFU): Model FLOP Utilization — what fraction of peak GPU FLOP/s is being
+used productively; (6)Cost per million tokens: Total TCO normalized by output;
+(7) Scalability: How does performance change as concurrent users increase; (8)Tail
+latency behavior under overload: Does the system degrade gracefully or catastroph-
+ically. I’d run benchmarks across a realistic request distribution (mix of short and long
+prompts and outputs) rather than synthetic fixed-length benchmarks.
+AI Engineering Insider 29

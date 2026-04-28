@@ -1,0 +1,133 @@
+# Chapter 9: Parallelism for Large Model Inference
+
+_Source pages: PDF pages 34-36_
+
+
+
+--- Page 34 ---
+
+Efficient LLM Inference CHAPTER 9. PARALLELISM FOR LARGE MODEL INFERENCE
+Chapter 9
+Parallelism for Large Model Inference
+9.1 Why Parallelism Is Necessary
+A 405B-parameter model in BF16 requires 810 GB of GPU memory for weights alone. Even
+thelargestindividualGPU(H100SXMwith80GBHBM)cannotholdthismodel. Parallelism
+is not optional for frontier-scale models — it is the only way to serve them.
+9.2 Tensor Parallelism
+Tensor parallelism (Shoeybi et al., 2019 — Megatron-LM) shards individual weight matrices
+across GPUs. For a linear layerY = XW:
+Column parallelism: Split W along columns: [W1|W2]. Each GPU computes Yi =
+XWi independently, then results are concatenated with a singleAllGather collective.
+Row parallelism: Split W along rows. Each GPU computes a partial sum, then results
+are combined with anAllReduce.
+In an MLP block, column parallelism on the first layer and row parallelism on the second
+requires only oneAllReduce per transformer layer — efficient on NVLink but expensive over
+PCIe/InfiniBand.
+Scaling efficiency: Tensor parallelism scales well up to the number of attention heads
+(8 GPUs for a model with 8 KV heads; beyond that, some heads have no work to do on
+some GPUs). Communication overhead grows quadratically with tensor parallelism degree,
+limiting practical scaling to 8 GPUs on a single NVLink-connected node.
+9.3 Pipeline Parallelism
+Pipeline parallelism assigns different layers of the transformer to different GPUs. GPU 0
+holds layers 1–10, GPU 1 holds layers 11–20, etc. Data flows as a pipeline: GPU 0 computes
+and passes activations to GPU 1, which computes and passes to GPU 2, and so on.
+The key challenge ispipeline bubbles: GPUs in later stages wait for earlier stages to
+produce activations. Micro-batching reduces bubble fraction (bubble fraction≈ (p − 1)/p for
+pipeline depth p with m micro-batches, ≈ p−1
+m+p−1).
+Pipeline parallelism is communication-efficient (only activations at stage boundaries, not
+full AllReduce) and can scale across nodes connected by slow InfiniBand, making it suitable
+for very large models (>100B parameters).
+9.4 Mixture of Experts Inference
+Mixture of Experts (MoE) models (Mixtral, DeepSeek-V2, Grok-1) replace dense FFN layers
+with a collection ofE expert networks. A router selects the top-K experts for each token:
+y =
+X
+k∈Top-K
+gk ·Expertk(x)
+AI Engineering Insider 30
+
+
+--- Page 35 ---
+
+Efficient LLM Inference CHAPTER 9. PARALLELISM FOR LARGE MODEL INFERENCE
+MoE models have high parameter counts but lowactive parameter count per token:
+Mixtral 8×7B has 47B total parameters but only 13B active per token. This makes inference
+faster (less compute per token) but harder to serve:
+• Expert parallelism: Each GPU hosts a subset of experts. Tokens are routed across
+GPUs via AllToAll collectives.
+• Expert load imbalance: Some experts may receive many tokens while others receive
+few, causing GPU imbalance.
+• Expert offloading: For very large MoE models, experts are offloaded to CPU/NVMe
+and loaded on demand.
+Interview Preparation — Mock Q&A
+Q9.1. Explain tensor parallelism for a transformer’s MLP block. What com-
+munication collectives are required and when?
+Answer: In a standard MLP blockY = GeLU(XW1)W2, tensor parallelism acrossN
+GPUs: (1)Column-parallel first layer: W1 is split along columns, so each GPU holds
+[W1]:,i:j and independently computes a shard ofH = GeLU(XW1). No communication
+needed here. (2) Row-parallel second layer: W2 is split along rows, matching the
+column sharding ofH. Each GPU computesYi = HiW2,i, a partial sum. AnAllReduce
+across all N GPUs combines these partial sums into the fullY. Total: one AllReduce
+per MLP block, and one AllReduce per attention block (same structure). AllReduce
+volume: 2 ×batch size×sequence length× dmodel per layer. On NVLink this is fast; over
+PCIe it can dominate latency.
+Q9.2. When would you choose tensor parallelism over pipeline parallelism for
+inference?
+Answer: I’d choosetensor parallelism when: (1) The model fits on a single node’s
+GPUs with NVLink interconnect — TP requires frequent AllReduce which needs high
+bandwidth; (2) Minimizing latency is critical — TP reduces per-layer computation time
+proportionally to the number of GPUs (each GPU does 1/N of the work per layer); (3)
+The model has many attention heads that can be evenly divided. I’d choosepipeline
+parallelism when: (1) The model is too large for a single node — PP only needs to
+communicate activations at layer boundaries, feasible over slower inter-node InfiniBand;
+(2) Throughput is more important than latency — PP introduces pipeline bubble la-
+tency but enables high batch throughput; (3) Expert parallelism for MoE models, which
+maps naturally to PP. In practice, production systems useboth in combination (3D
+parallelism): TP within a node, PP across nodes.
+Q9.3. Explain the expert routing mechanism in an MoE model. What chal-
+lenges does it create for inference serving?
+Answer: MoE models replace each FFN layer withE expert networks and a router.
+The router (usually a learned linear projection + softmax) computes routing weights
+for each token: g = softmax(xWr). The top-K experts (usually K = 2) are selected,
+and their outputs are weighted-summed. For inference serving, the challenges are: (1)
+Dynamic routing: Which expert processes which token changes with every input,
+making load balancing hard. Some experts may receive 10× more tokens than others in
+AI Engineering Insider 31
+
+
+--- Page 36 ---
+
+Efficient LLM Inference CHAPTER 9. PARALLELISM FOR LARGE MODEL INFERENCE
+a batch (expert collapse/load imbalance); (2)Expert parallelism communication:
+In a distributed setup, anAllToAll collective must route tokens to the correct expert
+GPU — this communication can bottleneck throughput; (3)Memory: Even if only 2
+experts are active per token, all E experts’ weights must be loaded. Expert caching
+strategies (preloading likely-accessed experts) can mitigate this.
+Q9.4.How does pipeline bubble fraction affect pipeline parallelism efficiency?
+How is it mitigated?
+Answer: When pipeline parallelism uses p pipeline stages and processes requests one
+by one, the first p − 1 stages of the pipeline are idle (“bubble”) while the last stage
+finishes, and the first stage is idle while the last stage processes. The bubble fraction is
+(p − 1)/p: for p = 8 stages, 7/8 of GPU-time is wasted. Mitigation viamicro-batching:
+split the batch intom micro-batches and pipeline them. The bubble fraction becomes
+(p−1)/(m+p−1). Forp = 8, m = 32: bubble =7/39 ≈ 18%. Additional techniques: (1)
+1F1B scheduling: alternate forward and backward passes; (2)Interleaved pipelines
+(Narayanan et al.): assign multiple non-contiguous layer chunks to each GPU, reducing
+bubble but increasing communication; (3) For inference-only (no backward), bubble is
+less severe since we can simply fill with more requests.
+Q9.5. What is expert offloading for large MoE models, and what are its
+performance implications?
+Answer: Expert offloading moves expert weight matrices from GPU memory (HBM)
+to CPU DRAM or NVMe storage. For a model like DeepSeek-V2 with 236B total
+parameters (∼60 experts in some MoE layers), only ∼20B parameters are active per
+token — but all parameters must be somewhere accessible. Expert offloading works as
+follows: an expert-aware scheduler predicts which experts will be needed for the next
+batch based on the routing decisions, and prefetches their weights from CPU/NVMe to
+GPU ahead of time. Weights for currently unused experts are evicted.Performance
+implications: PCIe bandwidth (∼32 GB/s) is far slower than HBM bandwidth (2–3
+TB/s), so any uncached expert load adds significant latency (∼ms per expert). This only
+works well when batch size is large enough (so expert access patterns are predictable)
+and when the expert cache hit rate is high. With 70%+ cache hit rate, expert offloading
+can enable serving 200B+ MoE models on a single 8-GPU node.
+AI Engineering Insider 32

@@ -1,0 +1,169 @@
+# Chapter 13: Observability and Production Engineering
+
+_Source pages: PDF pages 46-49_
+
+
+
+--- Page 46 ---
+
+Efficient LLM InferenceCHAPTER 13. OBSERVABILITY AND PRODUCTION ENGINEERING
+Chapter 13
+ObservabilityandProductionEngineer-
+ing
+13.1 The Production Inference Stack
+Deploying an LLM to production is not complete when the model passes offline benchmarks.
+Productiondemandsobservability, reliability, costmanagement, andcontinuousimprovement.
+The production inference stack adds several layers on top of the serving engine:
+• Logging and Tracing: Every request logged with TTFT, TPOT, token counts, model
+version, and error state.
+• Metrics and Alerting: Dashboards tracking p50/p95/p99 latency, throughput, GPU
+utilization, error rate.
+• A/B Testing Infrastructure: Traffic splitting between model versions for safe rollout.
+• Capacity Planning: Forecasting query volume and pre-provisioning hardware accord-
+ingly.
+• Cost Attribution: Per-team or per-feature breakdown of token costs.
+13.2 Key Metrics in Depth
+TTFT (Time to First Token): The duration from request receipt to the first generated
+token being returned to the user. TTFT is dominated by the prefill computation. Users
+perceive TTFT as “thinking time” — a TTFT>1s makes the application feel slow even if
+subsequent tokens stream quickly.
+TPOT (Time Per Output Token): The average time between consecutive output
+tokens during the streaming phase. Humans can read∼250 words/minute (∼5 tokens/s), so
+TPOT < 200 ms typically feels smooth. TPOT is dominated by decode step latency and
+GPU memory bandwidth.
+Goodput: The fraction of requests that meet all SLO targets simultaneously (both TTFT
+SLO and TPOT SLO). A system with 95% TTFT SLO compliance and 95% TPOT SLO
+compliancehasgoodputof 0.952 ≈ 90%iftheseareindependent. Goodputismoreinformative
+than individual metric compliance.
+Model FLOP Utilization (MFU): The fraction of theoretical peak FLOP/s that is
+being used productively for model computation. A well-optimized system achieves 30–60%
+MFU during prefill and much lower during decode (due to memory-bandwidth bottleneck).
+MFU is the key metric for understanding hardware efficiency.
+13.3 Failure Modes and Debugging
+AI Engineering Insider 42
+
+
+--- Page 47 ---
+
+Efficient LLM InferenceCHAPTER 13. OBSERVABILITY AND PRODUCTION ENGINEERING
+Symptom Likely Cause Diagnostic
+High TTFT spikes Long queuing time; prefill
+piracy
+Queue depth moni-
+toring, prefill latency
+breakdown
+TPOT regression KV cache evictions; in-
+creased batch size
+KV cache hit rate, de-
+code step latency
+OOM (Out of Mem-
+ory)
+KV cache overflow; request
+surge
+Memory monitoring,
+PagedAttention block
+stats
+Throughput cliff Tensor parallel communi-
+cation bottleneck
+GPU utilization vs.
+NVLink bandwidth
+Quality regression Model version issue; sam-
+pling parameter change
+Model version tagging
+in logs; online eval
+13.4 Cost Modeling
+Understanding and minimizing cost per million output tokens is critical for business viability.
+The major cost components are:
+Cost per 1M tokens= GPU cost per hour×hours
+total tokens generated
+Levers to reduce cost:
+1. Maximize GPU utilization: Batch more requests, use continuous batching.
+2. Reduce model compute: Quantization, distillation, smaller model.
+3. Spot/preemptible instances: 60–80% cheaper than on-demand, acceptable for batch
+workloads.
+4. Optimize hardware selection: Older GPU generations (A100 vs. H100) may be more
+cost-efficient for memory-bound workloads.
+5. Reduce output token count: Instruction-tune the model to be more concise.
+Interview Preparation — Mock Q&A
+Q13.1. How would you debug a sudden TTFT p99 spike in a production LLM
+serving system?
+Answer:My investigation would follow a structured funnel: (1)Network layer: Check
+if p99 TTFT increase is correlated with increased request arrival rate — if yes, the system
+may be queuing. Check queue depth metrics. (2)Prefill computation: Isolate prefill
+latency from queue wait time. If prefill is spiking, check whether input prompt length
+distribution changed (longer prompts take longer to prefill). (3)Resource contention:
+Check GPU utilization and NVLink bandwidth — if another workload was co-deployed,
+it may be competing for GPU resources. (4)KV cache pressure: If PagedAttention
+block allocation rate increased, request throughput may have increased, causing compute
+contention. (5) Model version or configuration change: Compare logs to identify
+AI Engineering Insider 43
+
+
+--- Page 48 ---
+
+Efficient LLM InferenceCHAPTER 13. OBSERVABILITY AND PRODUCTION ENGINEERING
+any deployment in the same time window. (6)Hardware fault: A degraded GPU or
+NVLink link can cause throughput reduction. Use nvidia-smi to check error counts.
+I’d correlate all these with the spike timestamp and work backward.
+Q13.2. What is goodput and why is it more meaningful than raw throughput
+or individual metric SLO compliance?
+Answer: Throughput measures total tokens generated per second — but tells you
+nothing about whether users are getting acceptable experiences. A system can have
+high throughput by batching many long requests while individual TTFT violates SLOs.
+Individual SLO compliance(e.g., “95% of requests meet TTFT SLO”) is better, but
+multiple SLOs may be measured independently, hiding compound violations.Goodput
+is the fraction of requests satisfying all SLO requirements simultaneously — TTFT
+SLO AND TPOT SLO AND any other defined targets. It captures the rate at which
+the system is actually serving users satisfactorily. If TTFT compliance is 90% and
+TPOT compliance is 90%, goodput could be as low as 81% if violations are independent.
+Goodput is the metric I’d optimize for in scheduling decisions: an SLO-aware scheduler
+should maximize goodput, not just total throughput.
+Q13.3. How would you design an A/B testing framework for comparing two
+LLM versions in production?
+Answer:Mydesign: (1) Trafficsplitting: UseaconsistenthashonuserID(notrequest
+ID) to split traffic deterministically — same users always hit the same model variant,
+reducing confounding from user preference variations. Typical split: 90/10 initially,
+widening as confidence grows. (2) Metrics: Track latency (TTFT/TPOT), quality
+signals (thumbs up/down, session length, follow-up questions), and cost per request for
+both variants. (3) Statistical significance: Use sequential A/B testing (e.g., SPRT)
+to determine when enough data has been collected, with pre-specified Type I/II error
+bounds. (4) Guardrails: Automatic rollback triggers — if safety violations, error rate,
+or latency degrade beyond a threshold on the test variant, automatically redirect all
+traffic to control. (5)Logging: Tag every request and response with variant ID, model
+version, and full timing breakdown for post-hoc analysis. (6)Rollout stages: Shadow
+mode (no user impact)→ 1% → 10% → 50% → 100%.
+Q13.4. Explain how you would capacity plan for an LLM serving system
+expecting 10× user growth in 6 months.
+Answer: Capacity planning steps: (1)Baseline measurement: Current queries per
+second (QPS), average input/output token lengths, and p95 latency. (2)Forecast QPS:
+Project 10× QPS growth with seasonality (peak/off-peak). (3)Throughput model-
+ing: Given current GPU count and throughput per GPU, compute GPU-hours needed
+at peak. Add 30–50% headroom for burstiness. (4)Cost optimization: Before scaling
+horizontally, exhaust vertical optimizations: can we apply 4-bit quantization to dou-
+ble throughput per GPU? Upgrade to H100s which have∼2× the memory bandwidth
+of A100s? Enable prefix caching for system prompts? (5)Auto-scaling: Implement
+Kubernetes-based or cloud-native autoscaling with GPU provisioning lead time baked
+in (GPU instances take 2–10 min to initialize). (6)Multi-region: Plan for geographic
+distribution to reduce latency and avoid single-region capacity constraints. Budget as-
+sumption: each H100 at $2/hour can serve∼1M output tokens/hour at full utilization.
+Q13.5. How would you measure and improve Model FLOP Utilization
+(MFU)?
+AI Engineering Insider 44
+
+
+--- Page 49 ---
+
+Efficient LLM InferenceCHAPTER 13. OBSERVABILITY AND PRODUCTION ENGINEERING
+Answer: Measuring MFU: Compute the number of FLOPs per forward pass (for a
+transformer: ≈ 6N for model with N parameters per token, times tokens per second),
+then divide by peak GPU FLOP/s. Using NVIDIA Nsight Compute: measure “SM
+Throughput” as a fraction of peak. Typical values: 30–45% MFU for prefill (GEMM-
+bound), <10% for decode (memory-bound). Improving MFU: For prefill: (1) Use
+FlashAttention-3 to improve attention kernel utilization; (2) Profile and fuse layernor-
+m/residual operations; (3) Use tensor parallel across multiple GPUs for large batches;
+(4) Ensure batch sizes are aligned to Tensor Core tile sizes (multiples of 16). For decode:
+MFU is inherently low and the right metric is memory bandwidth utilization instead
+— aim for >80% of peak HBM bandwidth. Improve by: (1) Increasing batch size to
+amortize weight-loading cost; (2) Quantizing weights to reduce bytes loaded per token;
+(3) Using speculative decoding to process multiple tokens per step.
+AI Engineering Insider 45

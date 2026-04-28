@@ -1,0 +1,34 @@
+# Appendix B: Annotated Paper Reading List
+
+_Source pages: PDF pages 54-54_
+
+
+
+--- Page 54 ---
+
+Efficient LLM Inference CHAPTER 14. THE FUTURE OF INFERENCE
+Appendix B: Annotated Paper Read-
+ing List
+1. Attention Is All You Need(Vaswani et al., 2017) — The foundational transformer
+paper. Read this first.
+2. FlashAttention (Dao et al., 2022) andFlashAttention-2 (Dao, 2023) — Essential for
+understanding IO-aware attention computation.
+3. EfficientMemoryManagementforLLMServing(vLLM/PagedAttention) (Kwon
+et al., 2023) — The paper that redefined LLM serving.
+4. GPTQ (Frantar et al., 2022) andAWQ(Lin et al., 2023) — Foundational quantization
+methods.
+5. Fast Inference from Transformers via Speculative Decoding(Leviathan et al.,
+2023) — Mathematically rigorous treatment of speculative decoding.
+6. Medusa (Cai et al., 2024) — Multi-head speculative decoding without a draft model.
+7. EAGLE-2 (Li et al., 2024) — State-of-the-art speculative decoding with dynamic trees.
+8. DeepSeek-V2 (DeepSeek, 2024) — MLA and MoE innovations for efficient inference.
+9. Mamba (Gu & Dao, 2023) — State space models as efficient alternatives to attention.
+10. Sarathi-Serve (Agrawal et al., 2024) — Chunked prefill for latency fairness.
+11. Scaling LLMTest-Time Compute Optimally(Snellet al., 2024) — Formal treatment
+of inference-time compute scaling.
+12. DeepSeek-R1 (DeepSeek, 2025) — RL-trained reasoning with GRPO.
+13. Multi-Token Prediction(Gloeckle et al., 2024) — Training and inference benefits of
+predicting multiple tokens.
+14. Mixture of Depths(Raposo et al., 2024) — Adaptive per-layer computation.
+15. StreamingLLM (Xiao et al., 2023) — Attention sinks and infinite-length inference.
+AI Engineering Insider 50

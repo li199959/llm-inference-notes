@@ -1,0 +1,142 @@
+# Chapter 12: Inference-Time Compute Scaling
+
+_Source pages: PDF pages 43-45_
+
+
+
+--- Page 43 ---
+
+Efficient LLM Inference CHAPTER 12. INFERENCE-TIME COMPUTE SCALING
+Chapter 12
+Inference-Time Compute Scaling
+12.1 The New Scaling Paradigm
+For years, the dominant scaling law was: more training compute→ better models. Chinchilla
+optimal training suggests spending the compute budget equally on model size and training
+tokens. But 2024–2025 saw the emergence of a complementary paradigm:inference-time
+compute scaling— spending more computeat inference timeto improve output quality.
+The key insight: for many tasks (especially reasoning, math, and coding), a smaller model
+that “thinks longer” can outperform a larger model that “answers immediately.” The question
+shifts from “how big a model can we train?” to “how much reasoning can we afford at inference
+time?”
+12.2 Chain-of-Thought and Its Inference Cost
+Chain-of-Thought (CoT) prompting (Wei et al., 2022) instructs the model to produce inter-
+mediate reasoning steps before the final answer. This dramatically improves performance on
+multi-step reasoning tasks but comes at a cost: a problem that requires a 10-token answer
+may require 500 tokens of reasoning, multiplying inference cost by 50×.
+Inference-time compute scaling question: Given a fixed compute budget, is it better
+to run a larger model once, or a smaller model with more reasoning tokens?
+Recent results (Snell et al., 2024, “Scaling LLM Test-Time Compute Optimally”) suggest
+the answer depends on problem difficulty: for hard problems, more reasoning on a smaller
+modelisoftenmoreefficient; foreasyproblems, theoverheadofextendedreasoningiswasteful.
+12.3 Process Reward Models and Search
+AProcess Reward Model (PRM)is trained to score the quality of intermediate reasoning
+steps, not just final answers. PRMs enable search: instead of following a single reasoning
+chain, generate multiple candidate reasoning paths and use the PRM to select or rerank the
+most promising one.
+Common search strategies:
+• Best-of-N: Generate N independent solutions and pick the one with the highest PRM
+score (or majority vote).
+• Beam search: Maintain K partial reasoning paths, expanding the most promising at
+each step.
+• Monte Carlo Tree Search (MCTS): Use the PRM as a value function in a tree search.
+Best-of-N with N = 64 can match or exceed the performance of a model 10× larger on
+math benchmarks (MATH, AIME).
+AI Engineering Insider 39
+
+
+--- Page 44 ---
+
+Efficient LLM Inference CHAPTER 12. INFERENCE-TIME COMPUTE SCALING
+12.4 DeepSeek-R1 and o1-Style Architectures
+OpenAI o1 and DeepSeek-R1 represent a qualitative shift: rather than prompting for CoT,
+these models are trained to reason via reinforcement learning. The key mechanism: the
+model generates extended internal monologues (“thoughts”) before producing a final answer.
+These thoughts are trained via RLHF/GRPO against verifiable rewards (e.g., math answer
+correctness):
+LGRPO = −Eo
+
+min
+ πθ(o|q)
+πref(o|q) Ao,clip(·, 1 ± ϵ)Ao
+
++ βDKL(πθ∥πref)
+The result is models that can “think” for thousands of tokens on hard problems, trading
+inference cost for accuracy. DeepSeek-R1-Zero demonstrates that this reasoning behavior can
+emerge from pure RL without supervised reasoning traces.
+Interview Preparation — Mock Q&A
+Q12.1. What is inference-time compute scaling? How does it differ from
+training-time compute scaling?
+Answer: Training-time compute scaling (Kaplan et al., 2020; Hoffmann et al., 2022
+- Chinchilla) studies how model capability grows with training FLOP budget — more
+parameters and more training tokens produce better models. Inference-time compute
+scaling is a newer paradigm: given a fixed trained model, how does performance scale
+when we spend more computeat inference time? More inference compute can be spent
+via: (1) generating more reasoning tokens (Chain-of-Thought); (2) generating multiple
+candidate solutions and selecting the best (Best-of-N sampling); (3) performing tree
+search with a verifier or reward model; (4) iterative refinement (the model critiques and
+improves its own output). The key insight is that inference compute can substitute for
+training compute: a 7B model spending 64× more inference compute can match a 70B
+model on some reasoning tasks. This changes the economics of AI deployment: the
+compute budget shifts from a one-time training cost to a per-query inference cost.
+Q12.2. Explain Process Reward Models (PRMs). How do they differ from
+Outcome Reward Models (ORMs)?
+Answer:AnOutcomeRewardModel(ORM) assignsasinglerewardscoretoacom-
+plete solution, based only on whether the final answer is correct. It cannot distinguish
+between a correct answer reached through flawed reasoning from one reached through
+valid reasoning. An ORM cannot guide search through intermediate steps. AProcess
+Reward Model (PRM)is trained to score each individual reasoning step for correct-
+ness, providing dense feedback throughout the reasoning chain. PRMs require step-level
+annotations in training data (labor-intensive to collect, though automated methods ex-
+ist). At inference time, PRMs enable search at the step level: MCTS, beam search,
+and step-level reranking all become possible. PRMs are superior to ORMs for complex
+multi-step reasoning where the intermediate path matters (preventing the model from
+getting the right answer for the wrong reason), but are significantly more expensive to
+train and apply.
+Q12.3. What is Best-of-N sampling? When is it efficient and when is it not?
+Answer: Best-of-N (BoN) sampling generatesN independent candidate outputs from
+AI Engineering Insider 40
+
+
+--- Page 45 ---
+
+Efficient LLM Inference CHAPTER 12. INFERENCE-TIME COMPUTE SCALING
+the model (with temperature > 0), scores each with a reward model or verifier, and
+returns the highest-scoring output. It is one of the simplest inference-time compute scal-
+ing methods.When efficient: (1) Tasks with verifiable correct answers (math, coding,
+formal logic) where a verifier is cheap and reliable; (2) When diversity of generations is
+high — if all N samples are identical, BoN provides no benefit; (3) WhenN is small
+(≤ 32) and the per-sample inference cost is low.When inefficient: (1) Open-ended
+tasks without a reliable evaluator (creative writing) — subjective quality is hard to score
+automatically; (2) Very largeN — BoN quality grows asO(log N ) in many settings (the
+expected maximum of N samples from a distribution), delivering diminishing returns;
+(3) Expensive models whereN samples costs N × more than a single sample — better
+to use beam search or step-level refinement for the same compute budget.
+Q12.4. Describe the GRPO training objective used in DeepSeek-R1. How
+does it differ from PPO?
+Answer:GRPO (Group Relative Policy Optimization) is an RL algorithm for LLM fine-
+tuning that avoids the need for a separate value network (critic). Instead of estimating
+the advantage function A using a value network (as PPO does), GRPO computes the
+advantage for each output relative to thegroup of outputs generated for the same ques-
+tion: Ai = ( ri −mean(r))/std(r), where r is the vector of rewards for the group. This
+eliminates the need to train a value function (saving memory and compute), reduces
+variance by normalizing within-group, and avoids the instability issues of value func-
+tion estimation. Compared to PPO: GRPO is simpler (fewer hyperparameters), more
+memory-efficient (no value network), but may have higher variance per update since
+the baseline is estimated from the current batch. DeepSeek-R1-Zero demonstrates that
+GRPO + simple verifiable rewards alone can induce complex reasoning behaviors like
+self-verification and extended thinking.
+Q12.5. For a math tutoring application, would you use a larger base model
+or a smaller model with extended inference compute? Justify your answer.
+Answer: I would choose asmaller model with extended inference compute, for
+several reasons: (1) Math is verifiable: Correct answers can be programmatically
+checked, enabling reliable Best-of-N or PRM-guided search without human evaluation;
+(2) Reasoning traces have pedagogical value: A math tutor that shows step-by-
+step work is more useful than one that gives only the answer; CoT reasoning at inference
+time is a feature, not overhead; (3)Cost efficiency: Serving a 7B R1-style model with
+extended inference is cheaper per query than serving a 70B dense model, even accounting
+for the extra tokens; (4)Adaptable compute budget: For easy problems, we can use
+fewer reasoning tokens; for hard problems, more — providing compute-adaptive serving
+that a fixed large model cannot. The practical choice would be something like a 7B
+or 14B fine-tuned reasoning model (DeepSeek-R1-Distill or similar) with configurable
+inference budget, rather than a 70B baseline model.
+AI Engineering Insider 41

@@ -1,0 +1,30 @@
+# Appendix A: Key Formulas Reference
+
+_Source pages: PDF pages 53-53_
+
+
+
+--- Page 53 ---
+
+Efficient LLM Inference CHAPTER 14. THE FUTURE OF INFERENCE
+Appendix A: Key Formulas Reference
+Concept Formula
+Attention Attn (Q, K, V) = softmax
+
+QK⊤
+√dk
+
+V
+KV Cache Size 2 × L × n × H × dh ×bytes
+Roofline Perf = min(Peak FLOP/s, I × Bmem)
+Speculative Speedup E[accepted] = 1−αK+1
+1−α
+Pipeline Bubble p−1
+m+p−1
+Quantization Scale s = xmax−xmin
+2b−1
+MFU Achieved FLOP/s
+Peak FLOP/s
+Cost per Token GPU cost/hr
+tokens/hr
+AI Engineering Insider 49

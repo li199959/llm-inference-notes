@@ -1,0 +1,140 @@
+# Chapter 14: The Future of Inference
+
+_Source pages: PDF pages 50-52_
+
+
+
+--- Page 50 ---
+
+Efficient LLM Inference CHAPTER 14. THE FUTURE OF INFERENCE
+Chapter 14
+The Future of Inference
+14.1 Diffusion-Based Language Models
+Autoregressive generation — one token at a time — is not the only paradigm.Diffusion
+language models (MDLM, Plaid, LLaDA) apply diffusion processes to discrete token se-
+quences: a forward process gradually masks tokens, and the model learns to denoise (unmask)
+them. Unlike autoregressive models, diffusion LLMs can generate all tokens in parallel (or
+semi-parallel), potentially achieving much higher hardware utilization during generation.
+The challenge: diffusion models for text have not yet matched autoregressive models in
+quality, and the iterative denoising process (typically 10–100 denoising steps, each touching
+all tokens) can be more expensive than expected. However, recent models like LLaDA have
+closed the gap significantly.
+14.2 Multi-Token Prediction
+Meta’s multi-token prediction (Gloeckle et al., 2024) trains models with multiple output
+heads that simultaneously predict the nextk tokens rather than just one. During inference,
+this can be used similarly to Medusa (self-speculative decoding) to generate multiple tokens
+per step, or the multiple heads can be used to generate better internal representations for
+downstream tasks. Models trained with 4-token prediction show better sample efficiency and
+representational quality than standard next-token prediction.
+14.3 Neuromorphic and Photonic Computing
+Neuromorphic chips(Intel Loihi 2, IBM NorthPole) implement neuron-like spiking com-
+putation that is extremely energy-efficient for sparse activations — orders of magnitude more
+efficient per operation than GPU deep learning. IBM’s NorthPole chip achieves 22 TOP-
+S/watt for dense neural inference vs.∼2 TOPS/watt for GPU. As LLM architectures evolve
+toward sparsity, neuromorphic hardware may become relevant.
+Photonic matrix multipliers (Lightmatter, Luminous Computing) perform matrix-
+vector multiplication using light, achieving theoretically unlimited bandwidth and near-zero
+energy per multiplication. Photonic computing is early-stage but could fundamentally change
+the memory-bandwidth bottleneck by making weight loading essentially free.
+14.4 The Inference-First Design Philosophy
+The field is increasingly moving toward designing models with inference in mind from the
+start:
+• Architecture choices for KV efficiency: MQA, GQA, MLA, and SSM layers reduce
+KV cache footprint.
+• Activation sparsity: Models trained with ReLU or top-K activation functions have
+sparse activations that can be exploited for faster FFN computation.
+AI Engineering Insider 46
+
+
+--- Page 51 ---
+
+Efficient LLM Inference CHAPTER 14. THE FUTURE OF INFERENCE
+• Mixture of Depths(Raposo et al., 2024): Dynamic computation where tokens attend
+to fewer layers based on difficulty.
+• Early exit: Confidence-based early stopping at intermediate layers for easy tokens.
+• Byte-level models: Operating on bytes rather than subword tokens removes the tok-
+enization bottleneck and enables better multilingual performance.
+Interview Preparation — Mock Q&A
+Q14.1. How do diffusion language models generate text differently from au-
+toregressive models? What are the inference implications?
+Answer: Autoregressive models generate text by predicting one token at a time, condi-
+tioning on all previous tokens — inherently sequential and memory-bandwidth-bound.
+Diffusion language models operate on the entire sequence simultaneously: start with a
+fully masked sequence of target length, then iteratively denoise (unmask) tokens over
+T steps using a model that predicts which tokens to unmask. This has key inference
+implications: (1)Parallelism: Each denoising step touches all positions simultaneously
+— fully utilizing tensor cores unlike autoregressive decode; (2)Controllability: Diffu-
+sion models can naturally fill in masked portions (infilling/editing) without re-generating
+from scratch; (3)Cost structure: T × N token predictions per generation vs.N for
+autoregressive — potentially more expensive for the same output length; (4)Length
+flexibility: Requires knowing the output length upfront (or treating it as a hyperpa-
+rameter). Current models like LLaDA useT = 64 to 256 steps, though distillation can
+reduce this to 4–8 steps.
+Q14.2. What is Mixture of Depths? How does it enable adaptive inference
+compute?
+Answer: Mixture of Depths (Raposo et al., 2024) is a framework where not all tokens
+pass through all transformer layers. A router at each layer decides whether a token
+should be processed by that layer’s attention and FFN, or simply passed through via
+a residual connection (skipping the layer). Easy/predictable tokens skip layers, while
+complex/uncertain tokens get full processing. At inference time, this provides adaptive
+compute: a simple factual query may use only 30% of the model’s layers effectively, while
+a complex reasoning query uses all layers. This is distinct from early exit (which stops
+generation at a fixed layer): MoD continues to process skipped tokens through later
+layers. Training requires careful routing — typically using a top-K selection per layer on
+a per-token basis. MoD achieves similar perplexity to dense models at 50% of the FLOP
+cost for many token distributions.
+Q14.3.WhymightphotoniccomputingchangeLLMinferencefundamentally?
+What are the current limitations?
+Answer: Photonic matrix multiplication uses interference of light waves to compute
+dot products at the speed of light, with near-zero energy cost per multiplication (pho-
+tons don’t heat resistors). The theoretical benefits for LLM inference: (1)Bandwidth
+wall disappears: Optical interconnects can carry terabits per second over a single
+fiber, massively exceeding HBM limitations; (2)Energy efficiency: 100–1000× lower
+energy per FLOP compared to GPU CMOS; (3)Latency: Light-speed propagation
+eliminates electronic switching delays.Current limitations: (1) Digital-to-optical
+AI Engineering Insider 47
+
+
+--- Page 52 ---
+
+Efficient LLM Inference CHAPTER 14. THE FUTURE OF INFERENCE
+conversion: Loading weights and activations into optical form still requires electronic
+ADC/DAC, which are slow and power-hungry; (2)Precision: Current photonic systems
+achieve 4–6 bit equivalent precision, sufficient for inference but requiring quantization;
+(3) Programmability: Reprogramming optical matrix elements is slower than loading
+new weights on a GPU; (4)Scalability: Current photonic chips implement small (64×64
+to 512×512) matrix multiplications, far smaller than LLM weight matrices. Lightmat-
+ter’s Passage chip is the most advanced commercial photonic inference accelerator as of
+2025.
+Q14.4. How does multi-token prediction improve both training and inference
+efficiency?
+Answer: Multi-token prediction trains the model withk prediction heads, each predict-
+ing one step further into the future: head 1 predictst + 1, head 2 predictst + 2, etc. All
+heads share the same body representation.Training benefits: (1) More gradient signal
+per forward pass — the model optimizesk prediction objectives simultaneously; (2) Bet-
+ter long-range representations — to predictt + 4, the model must capture higher-level
+patterns beyond local co-occurrence; (3) Meta’s experiments show 3–4 token prediction
+improves benchmark performance and coding ability, especially with smaller models.In-
+ference benefits: The additional prediction heads enable self-speculative decoding at
+no extra model size cost: use heads 2–k to draft tokenst + 2to t + k, then verify with the
+next main forward pass. This provides Medusa-style speedup without a separate draft
+model. Acceptance rates are moderate (∼0.7–0.8 per head), yielding 1.8–2.5× decode
+speedup on coding tasks.
+Q14.5. Describe an “inference-first” model design philosophy. What architec-
+tural choices reflect this approach?
+Answer:The inference-first philosophy starts with the question: “What constraints does
+production deployment impose?” and works backward to architecture decisions, rather
+thanmaximizingbenchmarkscoresattrainingtimeandthentryingtooptimizepost-hoc.
+Key architectural choices that reflect inference-first thinking: (1)GQA/MQA/MLA:
+Fewer KV heads dramatically reduce KV cache memory, directly enabling larger batch
+sizes and longer contexts; (2)SwiGLU FFN: The gated architecture allows pruning
+entireexpertsinMoEvariantsbasedonroutingscores, enablingconditionalcomputation;
+(3)Activation sparsity (ReLU variants): Sparse activation patterns (Mistral’s claim
+of89%FFNsparsitywithReLU)enableskippinglargepartsoftheFFNcomputation; (4)
+Reduced vocabulary: Smaller vocabularies mean smaller embedding tables and faster
+sampling; (5) Byte-level or character-level tokenization: Eliminates tokenization
+bottleneck, improves multilingual handling; (6)Depth over width: Narrower, deeper
+models may be harder to train but parallelize more efficiently over GPUs. Phi-3 and
+Gemma represent inference-first philosophies: deliberately small models optimized for
+quality per parameter rather than absolute benchmark maximization.
+AI Engineering Insider 48

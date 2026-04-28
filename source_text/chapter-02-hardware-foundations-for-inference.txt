@@ -1,0 +1,146 @@
+# Chapter 2: Hardware Foundations for Inference
+
+_Source pages: PDF pages 9-12_
+
+
+
+--- Page 9 ---
+
+Efficient LLM Inference CHAPTER 2. HARDWARE FOUNDATIONS FOR INFERENCE
+Chapter 2
+Hardware Foundations for Inference
+2.1 GPU Architecture for the Inference Engineer
+ModernGPUsareorganizedhierarchically. Atthetoplevel, anNVIDIAH100SXM5contains:
+• 132StreamingMultiprocessors(SMs) , eachcontaining128CUDAcoresand4fourth-
+generation Tensor Cores.
+• 80 GB HBM3memory with ≈3.35 TB/s bandwidth.
+• A shared memory / L1 cacheof 256 KB per SM, orders of magnitude faster than
+HBM.
+• An L2 cacheof 50 MB shared across all SMs.
+• NVLink 4.0providing 900 GB/s bidirectional bandwidth for multi-GPU communication.
+The memory hierarchy matters deeply for inference optimization. Operations that can be
+performed in shared memory (like fused attention in FlashAttention) avoid the slow round-trip
+to HBM entirely.
+2.2 Tensor Cores and Mixed Precision
+Tensor Cores are specialized matrix-multiplication units that operate on small tiles (e.g.,
+16 × 16 × 16) of operands in low-precision formats. The H100’s fourth-generation Tensor
+Cores support:
+Format Peak TFLOP/s Use Case
+FP64 67 Scientific computing
+TF32 989 Training default
+FP16/BF16 1,979 Inference standard
+FP8 3,958 Quantized inference
+INT8 3,958 Quantized inference
+The key insight is that inference can exploit lower precision than training because we only
+need to preserve theforward pass fidelity — no gradient accumulation in high precision is
+needed. This is why INT8 and FP8 inference delivers∼2× the theoretical peak throughput
+of FP16.
+2.3 Memory Hierarchy and Bandwidth
+Understanding where your data lives at any moment is critical for inference performance:
+AI Engineering Insider 5
+
+
+--- Page 10 ---
+
+Efficient LLM Inference CHAPTER 2. HARDWARE FOUNDATIONS FOR INFERENCE
+GPU Memory Hierarchy (H100 SXM)
+Level Capacity Bandwidth Latency
+Registers ∼256 KB/SM >20 TB/s ∼1 cycle
+Shared Mem (L1) 228 KB/SM ∼10 TB/s ∼20 cycles
+L2 Cache 50 MB ∼12 TB/s ∼150 cycles
+HBM3 (VRAM) 80 GB 3.35 TB/s ∼600 cycles
+NVLink Multi-GPU 900 GB/s microseconds
+PCIe CPU-GPU 64 GB/s microseconds
+FlashAttention’s core insight is that standard attention computes full attention matrices
+in HBM, but by tiling operations so they fit in shared memory, we avoid most HBM traffic
+and achieve near-optimal memory efficiency.
+2.4 CPU and Edge Hardware
+Not all inference happens on data center GPUs. CPU inference is critical for latency-sensitive
+applications, on-premises deployments, and cost optimization:
+Modern CPUs for inferenceuse AVX-512 VNNI (Vector Neural Network Instructions)
+to perform INT8 matrix-vector multiplications efficiently. Intel’s 4th-gen Xeon Scalable pro-
+cessors can deliver∼10 TFLOP/s of INT8 throughput, sufficient for small models.
+Apple Silicon(M3 Ultra) unifies CPU and GPU memory into a single pool (up to 192
+GB) with ∼800 GB/s bandwidth. This unified memory architecture makes it exceptionally
+good for inference on large models that would otherwise require multiple discrete GPUs.
+Qualcomm Hexagon DSPsandNPUs in mobile SoCs are purpose-built for low-power
+neural network inference, delivering several TOPS (Tera-Operations Per Second) at milliwatt
+power budgets.
+2.5 Emerging Hardware Trends
+• Google TPU v5p: Custom matrix engine with inter-chip interconnects enabling pods of
+thousands of chips for large-model inference.
+• Groq LPU: Deterministic inference accelerator with no DRAM — all weights stored in
+on-chip SRAM, enabling∼500 token/s per chip with ultra-low latency.
+• Cerebras WSE-3: Wafer-scale engine with 44 GB of on-chip SRAM, eliminating the
+HBM bottleneck entirely for models that fit.
+• Photonic computing: Early-stage technology using light instead of electrons for matrix
+multiplication, promising dramatically lower power consumption.
+Interview Preparation — Mock Q&A
+Q2.1. Explain the difference between HBM bandwidth and NVLink band-
+width. When does each become the bottleneck?
+Answer: HBM (High Bandwidth Memory) is the on-device memory attached to a sin-
+gle GPU — on an H100, it provides 3.35 TB/s and is the bottleneck during single-GPU
+inference when loading model weights token by token. NVLink is the high-speed inter-
+AI Engineering Insider 6
+
+
+--- Page 11 ---
+
+Efficient LLM Inference CHAPTER 2. HARDWARE FOUNDATIONS FOR INFERENCE
+connect between multiple GPUs on the same node, providing 900 GB/s total bandwidth
+on H100 NVLink. NVLink becomes the bottleneck duringtensor-parallel inference:
+when we shard a large model across multiple GPUs, each attention head’s output must
+be all-reduced across GPUs after every layer. If the model is sharded across 8 GPUs,
+every all-reduce consumes NVLink bandwidth. For very large models (175B+), NVLink
+can limit the scaling efficiency of tensor parallelism.
+Q2.2. Why does Apple Silicon perform competitively for LLM inference de-
+spite lower peak FLOP/s than discrete GPUs?
+Answer: Apple Silicon uses aunified memory architecturewhere CPU, GPU, and
+Neural Engine all share the same physical memory pool — up to 192 GB on M3 Ultra.
+This eliminates the PCIe bottleneck that plagues discrete GPU setups (which must copy
+dataacrossa64GB/sbus). Theunifiedmemorybandwidthof800GB/siscomparableto
+discrete GPUs, and crucially, a 70B-parameter model (140 GB in FP16) can fit entirely in
+memory without quantization, which is impossible on any single discrete GPU currently.
+For memory-bandwidth-bound decode workloads, bandwidth per dollar, not FLOP/s per
+dollar, is the relevant metric.
+Q2.3.What is the significance of Tensor Core formats (FP16 vs INT8 vs FP8)
+for inference? When would you choose each?
+Answer: Tensor Cores accelerate matrix multiplications in specific low-precision for-
+mats, with INT8/FP8 delivering∼2× the throughput of FP16 on the H100. I’d choose
+FP16/BF16 for models where accuracy is paramount and the hardware supports it
+natively — it’s the safe baseline.INT8 (via GPTQ, AWQ, or LLM.int8()) is excellent
+for weight quantization on models up to 70B parameters, providing roughly 2× memory
+reduction with minimal accuracy loss on most tasks.FP8 (supported natively on H100)
+is emerging as the sweet spot — better dynamic range than INT8, hardware-accelerated,
+and increasingly used in production systems like TensorRT-LLM. I’d pick FP8 for new
+deployments on H100-class hardware.
+Q2.4. How would you profile an LLM inference workload to identify whether
+it is compute-bound or memory-bandwidth-bound?
+Answer: I’d useNVIDIA Nsight Systemsfor a timeline view (SM activity, HBM
+transfers, PCIe transfers) and Nsight Compute for kernel-level profiling (achieved
+FLOP/s vs. peak, memory throughput vs. peak). Concretely: (1) Measure achieved
+memorybandwidthasafractionofpeakHBMbandwidth. (2)MeasureachievedFLOP/s
+as a fraction of peak Tensor Core FLOP/s. (3) Compute the operational intensity of
+key kernels. If memory bandwidth is near-saturated while FLOP/s utilization is low,
+we’re memory-bound. I’d also run a sweep over batch sizes: if throughput scales linearly
+with batch size, we’re in the memory-bound regime. If it plateaus, we’ve hit compute
+saturation.
+Q2.5. Describe the trade-offs between deploying inference on a Groq LPU
+versus an NVIDIA H100.
+Answer: The Groq LPU prioritizes deterministic ultra-low latency: with all weights
+stored in on-chip SRAM, there is no DRAM latency, yielding extremely consistent∼500
+token/s single-stream throughput. However, SRAM is expensive and limited, so LPUs
+can only serve models up to a certain size per chip, and scaling to very large models
+requires many chips with high cost. TheH100 offers far more flexibility: 80 GB HBM
+per GPU, support for virtually any model size across multiple GPUs, programmability
+AI Engineering Insider 7
+
+
+--- Page 12 ---
+
+Efficient LLM Inference CHAPTER 2. HARDWARE FOUNDATIONS FOR INFERENCE
+via CUDA, and an ecosystem of optimized libraries. I’d choose Groq for latency-critical
+applications with fixed model sizes (e.g., a production chatbot with a known 7B model).
+I’d choose H100 for flexibility, large models (70B+), or high-throughput batch inference
+where absolute latency is less critical.
+AI Engineering Insider 8

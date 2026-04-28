@@ -1,0 +1,128 @@
+# Chapter 11: Edge and On-Device Inference
+
+_Source pages: PDF pages 40-42_
+
+
+
+--- Page 40 ---
+
+Efficient LLM Inference CHAPTER 11. EDGE AND ON-DEVICE INFERENCE
+Chapter 11
+Edge and On-Device Inference
+11.1 The Edge Inference Landscape
+Running LLMs on edge devices — smartphones, laptops, embedded systems — is increasingly
+important for privacy, latency, and offline capability. The constraints are severe: a flagship
+smartphone may have 8–16 GB of unified memory (shared between CPU and GPU) and a
+power budget of ∼10 watts. By contrast, an H100 GPU consumes 700 watts with 80 GB
+dedicated HBM.
+Edge inference engineering is about getting the most intelligence within these constraints.
+11.2 Memory Constraints and Quantization for Edge
+A7B-parametermodelinFP16requires14GB—exceedingthememoryofmostsmartphones.
+4-bit quantization (AWQ/GPTQ) reduces this to 3.5 GB, making 7B models feasible on high-
+end phones. The Apple iPhone 16 Pro with 8 GB RAM can run 4-bit Llama 3 8B with shared
+system memory management.
+More aggressive quantization (2-bit, QuIP#) reduces to∼1.8 GB, enabling 7B models on
+mid-range devices, though with some quality degradation.
+11.3 Runtime Frameworks
+llama.cpp (Gerganov, 2023) is a pure C/C++ implementation of LLaMA and compatible
+models with:
+• CPU inference via AVX-512, NEON (ARM), and WebAssembly
+• GPU offloading (partial or full) to Metal (Apple), CUDA, Vulkan, OpenCL
+• Custom k-quant formats (Q4_K_M, Q5_K_M etc.) with group quantization for quality-
+size Pareto efficiency
+• Extremely memory-efficient attention via mmap-based weight loading
+Apple MLX is Apple’s native ML framework for Apple Silicon, exploiting the unified
+memory architecture. MLX enables running 70B models (in 4-bit) on Mac Studio with M3
+Ultra (192 GB), achieving∼30 tokens/s.
+ONNX Runtime provides cross-platform inference with hardware acceleration across
+CPUs, GPUs, and NPUs from different vendors.
+11.4 Neural Architecture Search for Efficiency
+Neural Architecture Search (NAS) automates the design of model architectures optimized for
+specific hardware constraints. For edge deployment, NAS can discover:
+• Optimal layer widths and depths for a given latency budget
+AI Engineering Insider 36
+
+
+--- Page 41 ---
+
+Efficient LLM Inference CHAPTER 11. EDGE AND ON-DEVICE INFERENCE
+• Mixed-precision assignment (different layers at different bit-widths)
+• Attention head pruning patterns
+• Block skipping or early exit strategies
+Hardware-aware NAS (HAT, OFA) trains a “supernet” from which sub-networks of differ-
+ent sizes can be extracted at inference time without re-training.
+Interview Preparation — Mock Q&A
+Q11.1. You are asked to deploy a competitive language model on a smart-
+phone with 6 GB RAM. What is your approach?
+Answer: Available RAM of 6 GB must be shared with the OS and other applications,
+leaving roughly 4–4.5 GB for the model. My approach: (1) Start with a 3B or 4B
+parameter model (Llama 3.2 3B, Phi-3 Mini 3.8B, Gemma 2 2B) which require only 1.5–
+2 GB at 4-bit; (2) Apply Q4_K_M quantization via llama.cpp or AWQ — this strikes
+the best quality-size balance for small models; (3) Use Metal GPU offloading on iOS
+(llama.cpp + Metal backend) for accelerated inference; (4) Implement prompt caching
+to avoid recomputing system prompt KV cache; (5) Apply speculative decoding with a
+smaller draft (e.g., a 1B model) if latency is critical; (6) Target 10–20 tokens/s which
+feels responsive for a chat interface. If 3B is insufficient quality, consider 7B at Q2_K
+(∼3.5 GB) accepting some quality degradation.
+Q11.2. Explain Apple MLX and why it is well-suited for LLM inference on
+Apple Silicon.
+Answer:MLX is Apple’s array computation library for Apple Silicon, designed with the
+unified memory architecture in mind. Unlike PyTorch which treats CPU and GPU as
+separate memory spaces requiring explicit data copies, MLX operates on a single shared
+memory space accessible from both CPU and GPU without copying. For LLM inference,
+this is transformative: model weights loaded once into system memory are immediately
+accessibletotheGPU(AppleSilicon’sintegratedGPU),eliminatingthePCIebottleneck.
+On an M3 Ultra with 192 GB of unified memory and 800 GB/s bandwidth, a 70B model
+at 4-bit (∼40 GB) fits comfortably with room for KV cache, achieving∼30 tokens/s.
+MLX also provides a Python interface, JIT compilation, lazy evaluation, and growing
+model support through the mlx-lm package. It represents the most practical path to
+running frontier-sized models on consumer hardware.
+Q11.3. What is the k-quant system in llama.cpp? How does it differ from
+standard uniform quantization?
+Answer: Llama.cpp implements “k-quants” — a family of mixed-precision block quanti-
+zation formats. Rather than quantizing each weight independently tok bits with a per-
+tensor or per-channel scale, k-quants use a hierarchical scheme: weights are grouped into
+blocks (typically 32 weights), and within each block, some weights are stored at higher
+precision than others. For example, in Q4_K_M: the “K” suffix indicates the super-block
+quantization scheme, and “M” indicates a quality tier (small, medium, large). Scale and
+minimum values are stored at higher precision per super-block, while individual weights
+use 4-bit encoding. This is superior to uniform quantization because: (1) Block-level
+scales adapt to local weight distributions, reducing quantization error; (2) Important
+weights (near the tails of the distribution) receive better representation; (3) The result-
+AI Engineering Insider 37
+
+
+--- Page 42 ---
+
+Efficient LLM Inference CHAPTER 11. EDGE AND ON-DEVICE INFERENCE
+ing quality/size ratio outperforms naive INT4 for the same bit budget. Q4_K_M is
+widely considered the best practical 4-bit format for llama.cpp.
+Q11.4. Compare llama.cpp CPU inference vs GPU inference. When would
+you prefer CPU inference?
+Answer: GPU inference(Metal, CUDA, Vulkan) uses the device’s parallel compute
+units and high bandwidth memory for maximum throughput — typically 5–20× faster
+than CPU for the same model.CPU inferenceuses AVX-512/NEON SIMD instruc-
+tions, system RAM (much slower than GPU HBM), and sequential processing. CPU
+inference is slower but has advantages: (1)No VRAM limit: System RAM (64–512
+GB on desktop) can hold much larger models than any GPU’s VRAM; (2)Thermal:
+CPUs can sustain inference longer in passive cooling environments; (3)Availability:
+CPU inference works on any machine with no GPU. I’d prefer CPU when: (1) The
+model is too large for the GPU’s VRAM; (2) The device has no GPU or a very weak
+integrated GPU; (3) Throughput is not critical and batch processing at low speed is ac-
+ceptable. Partial GPU offloading (llama.cpp’s-ngl flag) lets you offload as many layers
+as fit in GPU VRAM and run the rest on CPU, balancing both.
+Q11.5.What is Hardware-Aware NAS? How does OFA (Once-For-All) enable
+efficient edge deployment?
+Answer:Hardware-Aware NAS searches for model architectures that are Pareto-optimal
+in accuracy vs. target hardware metric (latency, energy, memory). Instead of a single
+fixed model, it produces families of models with different accuracy-efficiency trade-offs,
+each optimized for specific hardware.Once-For-All (OFA)(Han et al., 2020) trains a
+single large “supernet” from which sub-networks of different depths, widths, and kernel
+sizes can be extracted without re-training. OFA uses progressive shrinking: first train the
+full network, then progressively train smaller sub-networks by sampling them from the
+full network and applying knowledge distillation from the full network. At deployment
+time, given a target device and latency constraint, a lookup table or predictor estimates
+sub-network latency, and the best-accuracy sub-network within the budget is selected.
+For LLM inference, OFA-style approaches can produce models with 2–5× different sizes,
+all derived from one training run.
+AI Engineering Insider 38
